@@ -1,0 +1,24 @@
+[package]
+name = "zoxide-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "C FFI bindings for zoxide — in-process shell integration"
+license = "MIT"
+
+[lib]
+name = "zoxide_ffi"
+crate-type = ["cdylib"]
+
+[dependencies]
+zoxide = { path = "../zoxide", default-features = false, features = ["in-process"] }
+libc = "0.2"
+
+[dev-dependencies]
+rstest = { version = "0.26.0", default-features = false }
+tempfile = "3.15.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

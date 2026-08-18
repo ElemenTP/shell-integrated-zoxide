@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>ZoxideNative</AssemblyName>
+    <RootNamespace>ZoxideNative</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- Ship the module manifest + script module next to the binary so the
+       dotnet output directory is a complete, importable module. -->
+  <ItemGroup>
+    <None Include="..\zoxide-native.psd1" Link="zoxide-native.psd1"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\zoxide-native.psm1" Link="zoxide-native.psm1"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
