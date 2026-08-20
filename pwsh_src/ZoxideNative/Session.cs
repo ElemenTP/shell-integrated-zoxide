@@ -4,6 +4,31 @@ using System.Text;
 namespace ZoxideNative;
 
 /// <summary>
+/// Result of a native zoxide query. Query failures are returned as values
+/// rather than thrown exceptions so the PowerShell module can reproduce the
+/// original `zoxide` binary behavior (write a short error to stderr and
+/// continue the shell session).
+/// </summary>
+public sealed class QueryResult
+{
+    public QueryResult(bool success, string? output, string? error)
+    {
+        Success = success;
+        Output = output ?? string.Empty;
+        Error = error;
+    }
+
+    /// <summary>True when zo_session_query returned 0.</summary>
+    public bool Success { get; }
+
+    /// <summary>Query output; empty when <see cref="Success"/> is false.</summary>
+    public string Output { get; }
+
+    /// <summary>Native error message; null/empty for silent exits (Ctrl-C).</summary>
+    public string? Error { get; }
+}
+
+/// <summary>
 /// Safe managed wrapper around the zoxide-ffi native session.
 ///
 /// The session keeps the zoxide database open in unmanaged memory for the
@@ -34,7 +59,7 @@ public sealed class Session : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(path);
- 
+
         int rc = NativeMethods.SessionAdd(_handle, path, score);
         if (rc != 0)
         {
@@ -69,8 +94,12 @@ public sealed class Session : IDisposable
     /// <param name="interactive">Run fzf and return the selected path.</param>
     /// <param name="list">Return every match, joined with newlines.</param>
     /// <param name="score">Prefix each result with its frecency score.</param>
-    /// <returns>The query result (path, or lines for list mode).</returns>
-    public string Query(
+    /// <returns>
+    /// A <see cref="QueryResult"/>. On native failure <c>Success</c> is false,
+    /// <c>Output</c> is empty and <c>Error</c> contains the native error
+    /// message (empty for silent exits such as fzf Ctrl-C).
+    /// </returns>
+    public QueryResult Query(
         IReadOnlyList<string>? keywords = null,
         string? exclude = null,
         string? baseDir = null,
@@ -90,16 +119,19 @@ public sealed class Session : IDisposable
             {
                 Marshal.StructureToPtr(input.Options, optionsPtr, false);
                 int rc = NativeMethods.SessionQuery(_handle, optionsPtr, out IntPtr output);
-                if (rc != 0 || output == IntPtr.Zero)
+                if (rc != 0)
                 {
-                    string? err = LastError();
-                    throw new InvalidOperationException(
-                        $"zoxide query failed (rc={rc}): {err ?? "unknown error"}");
+                    return new QueryResult(false, null, LastError());
+                }
+                if (output == IntPtr.Zero)
+                {
+                    return new QueryResult(false, null, "query returned no output");
                 }
 
                 try
                 {
-                    return Marshal.PtrToStringUTF8(output) ?? string.Empty;
+                    return new QueryResult(
+                        true, Marshal.PtrToStringUTF8(output) ?? string.Empty, null);
                 }
                 finally
                 {

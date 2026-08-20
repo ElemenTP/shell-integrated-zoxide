@@ -46,10 +46,10 @@ $script:__Session = $null
 
 function Get-Session {
     if ($null -eq $script:__Session) {
-        # _ZO_DATA_DIR is read by .NET only, so pass it to the native session
-        # explicitly; the other _ZO_* variables are synchronized below.
+        # The native session reads _ZO_DATA_DIR through getenv(). Copy the
+        # managed value into the native environment before creating it.
         $dataDir = [System.Environment]::GetEnvironmentVariable('_ZO_DATA_DIR')
-        if ($null -ne $envValue) {
+        if ($null -ne $dataDir) {
             [ZoxideNative.ZoxideEnvironment]::Set('_ZO_DATA_DIR', $dataDir)
         }
         $script:__Session = [ZoxideNative.Session]::new()
@@ -181,7 +181,8 @@ function Invoke-ZoxideQuery {
     <#
     .SYNOPSIS
         Internal helper: bind PowerShell named parameters onto the C# Session
-        method (PowerShell does not support splatting .NET method calls).
+        method. Returns [ZoxideNative.QueryResult] rather than throwing when
+        the native query fails (e.g. no match or fzf Ctrl-C).
     #>
     param(
         [string[]]$Keywords = @(),
@@ -194,6 +195,18 @@ function Invoke-ZoxideQuery {
     )
     return (Get-Session).Query(
         $Keywords, $Exclude, $BaseDir, $All, $Interactive, $List, $Score)
+}
+
+function Write-ZoxideQueryError {
+    <#
+    .SYNOPSIS
+        Mirror `zoxide` binary stderr behavior for a failed query. Silent exits
+        (fzf Ctrl-C) have an empty native error and produce no output.
+    #>
+    param([string]$Message)
+    if (-not [string]::IsNullOrEmpty($Message)) {
+        [Console]::Error.WriteLine("zoxide-native: $Message")
+    }
 }
 
 # Jump to a directory using only keywords.
@@ -217,28 +230,26 @@ function global:__zoxide_z {
 
     $keywords = if ($args.Count -gt 0) { [string[]]$args } else { [string[]]@() }
     $exclude = __zoxide_pwd
-    try {
-        $result = Invoke-ZoxideQuery -Keywords $keywords -Exclude $exclude
-    } catch {
-        Microsoft.PowerShell.Utility\Write-Error $_
+    $query = Invoke-ZoxideQuery -Keywords $keywords -Exclude $exclude
+    if (-not $query.Success) {
+        Write-ZoxideQueryError -Message $query.Error
         return
     }
-    if (-not [string]::IsNullOrEmpty($result)) {
-        __zoxide_cd $result $true
+    if (-not [string]::IsNullOrEmpty($query.Output)) {
+        __zoxide_cd $query.Output $true
     }
 }
 
 # Jump to a directory using interactive search.
 function global:__zoxide_zi {
     $keywords = if ($args.Count -gt 0) { [string[]]$args } else { [string[]]@() }
-    try {
-        $result = Invoke-ZoxideQuery -Keywords $keywords -Interactive $true
-    } catch {
-        Microsoft.PowerShell.Utility\Write-Error $_
+    $query = Invoke-ZoxideQuery -Keywords $keywords -Interactive $true
+    if (-not $query.Success) {
+        Write-ZoxideQueryError -Message $query.Error
         return
     }
-    if (-not [string]::IsNullOrEmpty($result)) {
-        __zoxide_cd $result $true
+    if (-not [string]::IsNullOrEmpty($query.Output)) {
+        __zoxide_cd $query.Output $true
     }
 }
 

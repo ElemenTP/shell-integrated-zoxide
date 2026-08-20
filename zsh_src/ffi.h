@@ -37,7 +37,7 @@ typedef struct {
 } zo_stats_t;
 
 /* Session lifecycle. */
-zo_session_t *zo_session_create();
+zo_session_t *zo_session_create(void);
 void zo_session_destroy(zo_session_t *session);
 
 /* Database operations. Return 0 on success, <0 on error. */

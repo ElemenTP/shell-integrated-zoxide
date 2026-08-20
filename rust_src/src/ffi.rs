@@ -124,13 +124,9 @@ fn cstr_to_option_string(ptr: *const c_char) -> Option<String> {
 }
 
 fn cstr_array_to_vec(ptr: *const *const c_char, len: usize) -> Option<Vec<String>> {
-    if len == 0 {
+    if ptr.is_null() || len == 0 {
         return Some(Vec::new());
     }
-    if ptr.is_null() {
-        return None;
-    }
-
     let mut result = Vec::with_capacity(len);
     // SAFETY: `ptr` points to `len` valid `char *` values, all readable for the
     // duration of the FFI call (zsh argv / unmanaged pwsh memory).
@@ -140,8 +136,11 @@ fn cstr_array_to_vec(ptr: *const *const c_char, len: usize) -> Option<Vec<String
             if s.is_null() {
                 return None;
             }
-            let s = CStr::from_ptr(s).to_str().ok()?;
-            result.push(s.to_string());
+            if let Ok(s) = CStr::from_ptr(s).to_str() {
+                result.push(s.to_string());
+            } else {
+                return None;
+            }
         }
     }
     Some(result)
@@ -442,7 +441,9 @@ mod tests {
     }
 
     fn session(data_dir: &std::path::Path) -> *mut SessionHandle {
-        unsafe { env::set_var("_ZO_DATA_DIR", data_dir.as_os_str()); };
+        unsafe {
+            env::set_var("_ZO_DATA_DIR", data_dir.as_os_str());
+        };
         let handle = zo_session_create();
         assert!(!handle.is_null());
         handle
