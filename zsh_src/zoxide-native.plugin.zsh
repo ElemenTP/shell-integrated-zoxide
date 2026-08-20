@@ -17,10 +17,13 @@
 #   3. common install prefixes              — ~/.local/lib/zsh/zoxide-native, ...
 #
 # The plugin mirrors the official `zoxide init zsh` script, replacing the
-# `\command zoxide add|query` subprocess calls with the in-process `zoxide`
-# builtin (loaded via zmodload). `zoxide query` writes its result to
-# $ZOXIDE_RESULT and returns status 0/1, so no command substitution (and
-# therefore no fork) is required for the hot paths.
+# `\command zoxide add|query` subprocess calls with the zero-argument
+# `zoxide_add` / `zoxide_query` builtins. Arguments and results are exchanged
+# through zsh variables:
+#
+#   ZOXIDE_ADD_PATH / ZOXIDE_ADD_SCORE      → zoxide_add
+#   ZOXIDE_QUERY_*                          → zoxide_query
+#   ZOXIDE_RESULT                           ← zoxide_query
 
 # Prevent double-loading
 if ((${+_ZOXIDE_NATIVE_LOADED})); then
@@ -103,42 +106,43 @@ zmodload zoxide_native || {
 
 # pwd based on the value of _ZO_RESOLVE_SYMLINKS.
 function __zoxide_pwd() {
-  if [[ ${_ZO_RESOLVE_SYMLINKS:-0} == "1" ]]; then
-    \builtin pwd -P
-  else
     \builtin pwd -L
-  fi
 }
 
 # cd + custom logic based on the value of _ZO_ECHO.
 function __zoxide_cd() {
-  # shellcheck disable=SC2164
-  \builtin cd -- "$@"
-  local _zo_status=$?
-  if ((_zo_status == 0)) && [[ ${_ZO_ECHO:-0} == "1" ]]; then
-    __zoxide_pwd
-  fi
-  return _zo_status
+    # shellcheck disable=SC2164
+    \builtin cd -- "$@"
 }
 
-# Hook to add new entries to the database.
+# Query helper: zoxide_query reads its keyword array from this variable.
+function __zoxide_query() {
+  typeset -a ZOXIDE_QUERY_KEYWORDS
+  ZOXIDE_QUERY_KEYWORDS=("$@")
+  zoxide_query
+}
+
+# Hook to add new entries to the database. Only runs on directory changes.
 function __zoxide_hook() {
-  local _zo_pwd
-  _zo_pwd="$(__zoxide_pwd)" || return 0
-  [[ -n "$_zo_pwd" ]] || return 0
-  zoxide add -- "$_zo_pwd"
+  ZOXIDE_ADD_PATH="$PWD"
+  ZOXIDE_ADD_SCORE=1
+  zoxide_add
 }
 
 # Initialize hook.
 \builtin typeset -ga precmd_functions
+\builtin typeset -ga chpwd_functions
+# shellcheck disable=SC2034,SC2296
 precmd_functions=("${(@)precmd_functions:#__zoxide_hook}")
-precmd_functions+=(__zoxide_hook)
+# shellcheck disable=SC2034,SC2296
+chpwd_functions=("${(@)chpwd_functions:#__zoxide_hook}")
+chpwd_functions+=(__zoxide_hook)
 
 # Report common issues (mirrors `zoxide init zsh`).
 function __zoxide_doctor() {
   [[ ${_ZO_DOCTOR:-1} -ne 0 ]] || return 0
   [[ $- == *i* ]] || return 0
-  [[ ${precmd_functions[(Ie)__zoxide_hook]:-} -eq 0 ]] || return 0
+  [[ ${chpwd_functions[(Ie)__zoxide_hook]:-} -eq 0 ]] || return 0
 
   _ZO_DOCTOR=0
   \builtin printf '%s\n' \
@@ -155,16 +159,22 @@ function __zoxide_doctor() {
 # Jump to a directory using only keywords.
 function __zoxide_z() {
   __zoxide_doctor
-  if [[ "$" -eq 0 ]]; then
+  if [[ "$#" -eq 0 ]]; then
     __zoxide_cd ~
-  elif [[ "$" -eq 1 ]] && [[ "$1" = '-' ]]; then
+  elif [[ "$#" -eq 1 ]] && [[ "$1" = '-' ]]; then
     __zoxide_cd "${OLDPWD}"
-  elif [[ "$" -eq 1 ]] && { [[ "$1" =~ ^[-+][0-9]+$ ]] || (\builtin cd -q -- "$1") &>/dev/null; }; then
+  elif [[ "$#" -eq 1 ]] && { [[ "$1" =~ ^[-+][0-9]+$ ]] || (\builtin cd -q -- "$1") &>/dev/null; }; then
     __zoxide_cd "$1"
-  elif [[ "$" -eq 2 ]] && [[ "$1" = "--" ]]; then
+  elif [[ "$#" -eq 2 ]] && [[ "$1" = "--" ]]; then
     __zoxide_cd "$2"
   else
-    if zoxide query --exclude "$(__zoxide_pwd)" -- "$@"; then
+    unset ZOXIDE_QUERY_EXCLUDE ZOXIDE_QUERY_BASE_DIR
+    typeset -g ZOXIDE_QUERY_ALL=0
+    typeset -g ZOXIDE_QUERY_INTERACTIVE=0
+    typeset -g ZOXIDE_QUERY_LIST=0
+    typeset -g ZOXIDE_QUERY_SCORE=0
+    ZOXIDE_QUERY_EXCLUDE="$PWD"
+    if __zoxide_query "$@"; then
       __zoxide_cd "${ZOXIDE_RESULT}"
     fi
   fi
@@ -173,7 +183,12 @@ function __zoxide_z() {
 # Jump to a directory using interactive search.
 function __zoxide_zi() {
   __zoxide_doctor
-  if zoxide query --interactive -- "$@"; then
+  unset ZOXIDE_QUERY_EXCLUDE ZOXIDE_QUERY_BASE_DIR
+  typeset -g ZOXIDE_QUERY_ALL=0
+  typeset -g ZOXIDE_QUERY_INTERACTIVE=1
+  typeset -g ZOXIDE_QUERY_LIST=0
+  typeset -g ZOXIDE_QUERY_SCORE=0
+  if __zoxide_query "$@"; then
     __zoxide_cd "${ZOXIDE_RESULT}"
   fi
 }
@@ -200,7 +215,13 @@ if [[ -o zle ]]; then
     elif [[ "${words[-1]}" == '' ]]; then
       # Show completions for Space-Tab. Call the builtin directly so the
       # database session stays in this shell (no fork).
-      if zoxide query --exclude "$(__zoxide_pwd || \builtin true)" --interactive -- ${words[2,-1]} 2>/dev/null; then
+      unset ZOXIDE_QUERY_EXCLUDE ZOXIDE_QUERY_BASE_DIR
+      typeset -g ZOXIDE_QUERY_ALL=0
+      typeset -g ZOXIDE_QUERY_INTERACTIVE=1
+      typeset -g ZOXIDE_QUERY_LIST=0
+      typeset -g ZOXIDE_QUERY_SCORE=0
+      ZOXIDE_QUERY_EXCLUDE="$PWD"
+      if __zoxide_query ${words[2,-1]} 2>/dev/null; then
         __zoxide_result="${ZOXIDE_RESULT}"
       else
         __zoxide_result=''
@@ -222,7 +243,7 @@ if [[ -o zle ]]; then
 
   function __zoxide_z_complete_helper() {
     if [[ -n "${__zoxide_result}" ]]; then
-      BUFFER="cd ${(q-)__zoxide_result}"
+      BUFFER="z ${(q-)__zoxide_result}"
       __zoxide_result=''
       \builtin zle reset-prompt
       \builtin zle accept-line

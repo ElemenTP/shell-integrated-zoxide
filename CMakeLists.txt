@@ -17,11 +17,11 @@ if(WIN32)
     set(BUILD_ZSH_MODULE OFF)
 endif()
 
-# zoxide source: "AUTO" (use repo symlink / clone from GitHub) or local path.
-# Unlike the starship project, zoxide upstream is binary-only, so the Rust FFI
-# crate includes the required source modules via #[path] through this symlink.
+# zoxide source: "AUTO" (use repo symlink / clone the in-process fork) or a
+# local path. rust_src depends on this checkout as a Cargo path dependency with
+# the "in-process" feature enabled.
 set(ZOXIDE_SOURCE "AUTO" CACHE STRING
-    "zoxide source: 'AUTO' to use the zoxide symlink (or clone from GitHub), or a local path")
+    "zoxide source: 'AUTO' to use the zoxide symlink (or clone the in-process fork), or a local path")
 # zsh source: "AUTO" (use repo symlink / download zsh 5.9.2) or local path.
 set(ZSH_SOURCE "AUTO" CACHE STRING
     "zsh source: 'AUTO' to use the zsh symlink (or download zsh 5.9.2), or path to configured source tree")
@@ -55,8 +55,8 @@ if(ZOXIDE_SOURCE STREQUAL "AUTO")
     else()
         message(STATUS "Fetching zoxide from GitHub...")
         FetchContent_Declare(zoxide-src
-            GIT_REPOSITORY "https://github.com/ajeetdsouza/zoxide"
-            GIT_TAG        v0.10.0
+            GIT_REPOSITORY "https://github.com/ElemenTP/zoxide"
+            GIT_TAG        in-process
             GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(zoxide-src)
@@ -71,9 +71,40 @@ endif()
 if(NOT EXISTS "${ZOXIDE_SRC_DIR}/src/config.rs")
     message(FATAL_ERROR "zoxide source at ${ZOXIDE_SRC_DIR} is missing src/config.rs")
 endif()
+if(NOT EXISTS "${ZOXIDE_SRC_DIR}/src/session.rs")
+    message(FATAL_ERROR "zoxide source at ${ZOXIDE_SRC_DIR} is missing the "
+                        "in-process session (src/session.rs)")
+endif()
 
-# Keep rust_src's relative #[path] include stable: repo-root/zoxide must point
-# at the selected source tree.
+# zoxide's build.rs regenerates shell completions into the source tree. When
+# the selected checkout is read-only (as in sandboxed CI), copy it into the
+# build directory so cargo has a writable tree. In normal development the
+# original checkout is used directly.
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E touch "${ZOXIDE_SRC_DIR}/.cmake-write-test"
+    RESULT_VARIABLE _zoxide_touch_rc
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+if(_zoxide_touch_rc EQUAL 0)
+    file(REMOVE "${ZOXIDE_SRC_DIR}/.cmake-write-test")
+else()
+    set(_zoxide_readonly_src "${ZOXIDE_SRC_DIR}")
+    set(ZOXIDE_SRC_DIR "${CMAKE_BINARY_DIR}/zoxide-src")
+    file(REMOVE_RECURSE "${ZOXIDE_SRC_DIR}")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${_zoxide_readonly_src}" "${ZOXIDE_SRC_DIR}"
+        RESULT_VARIABLE _zoxide_copy_rc
+    )
+    if(NOT _zoxide_copy_rc EQUAL 0)
+        message(FATAL_ERROR "failed to copy read-only zoxide source to ${ZOXIDE_SRC_DIR}")
+    endif()
+    message(STATUS "zoxide checkout is read-only — using writable copy in ${ZOXIDE_SRC_DIR}")
+endif()
+
+# Keep rust_src's Cargo path dependency stable: repo-root/zoxide must point at
+# the selected (possibly copied) source tree.
 get_filename_component(_zoxide_real "${ZOXIDE_LINK}" REALPATH)
 if(NOT _zoxide_real STREQUAL "${ZOXIDE_SRC_DIR}")
     file(REMOVE "${ZOXIDE_LINK}")
@@ -165,10 +196,7 @@ file(GLOB_RECURSE ZOXIDE_FFI_RUST_SOURCES CONFIGURE_DEPENDS
     "${RUST_SRC_DIR}/src/*.rs"
 )
 file(GLOB_RECURSE ZOXIDE_UPSTREAM_SOURCES CONFIGURE_DEPENDS
-    "${ZOXIDE_SRC_DIR}/src/config.rs"
-    "${ZOXIDE_SRC_DIR}/src/db/*.rs"
-    "${ZOXIDE_SRC_DIR}/src/error.rs"
-    "${ZOXIDE_SRC_DIR}/src/util.rs"
+    "${ZOXIDE_SRC_DIR}/src/*.rs"
 )
 
 set(ZOXIDE_FFI_DEPENDS
@@ -176,6 +204,7 @@ set(ZOXIDE_FFI_DEPENDS
     ${ZOXIDE_UPSTREAM_SOURCES}
     "${RUST_SRC_DIR}/Cargo.toml"
     "${RUST_SRC_DIR}/Cargo.lock"
+    "${ZOXIDE_SRC_DIR}/Cargo.toml"
 )
 
 # On macOS, rustc's default LC_ID_DYLIB is the ABSOLUTE cargo target path,
@@ -211,7 +240,6 @@ if(BUILD_ZSH_MODULE)
 
     add_library(${ZSH_MODULE_NAME} SHARED
         "${CMAKE_SOURCE_DIR}/zsh_src/module.c"
-        "${CMAKE_SOURCE_DIR}/zsh_src/argparse.c"
     )
 
     target_include_directories(${ZSH_MODULE_NAME} PRIVATE
@@ -334,17 +362,6 @@ endif()
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 if(BUILD_TESTS)
-    # Unit test for the pure-C argument parser used by the zsh shim.
-    add_executable(argparse_unit
-        "${CMAKE_SOURCE_DIR}/tests/test_argparse.c"
-        "${CMAKE_SOURCE_DIR}/zsh_src/argparse.c"
-    )
-    target_include_directories(argparse_unit PRIVATE "${CMAKE_SOURCE_DIR}/zsh_src")
-    target_link_libraries(argparse_unit PRIVATE m)
-    if(NOT WIN32)
-        target_compile_options(argparse_unit PRIVATE -Wall -Wextra)
-    endif()
-
     # System test: dlopen the built cdylib and exercise the exported ABI.
     add_executable(ffi_smoke "${CMAKE_SOURCE_DIR}/tests/ffi_smoke.c")
     target_include_directories(ffi_smoke PRIVATE "${CMAKE_SOURCE_DIR}/zsh_src")
@@ -356,7 +373,6 @@ if(BUILD_TESTS)
     endif()
 
     enable_testing()
-    add_test(NAME argparse_unit COMMAND argparse_unit)
     add_test(NAME ffi_smoke COMMAND ffi_smoke "${FFI_SHARED}")
 
     add_custom_target(test-rust
@@ -366,17 +382,29 @@ if(BUILD_TESTS)
         USES_TERMINAL
     )
 
+    add_custom_target(test-upstream
+        COMMAND ${CMAKE_COMMAND} -E env "CARGO_HOME=${CARGO_HOME_DIR}"
+            ${CARGO} test --features in-process
+        WORKING_DIRECTORY "${ZOXIDE_SRC_DIR}"
+        USES_TERMINAL
+    )
+
     if(BUILD_ZSH_MODULE AND TARGET ${ZSH_MODULE_NAME})
+        if(_is_multi_config)
+            set(ZSH_MODULE_TEST_DIR "${CMAKE_SOURCE_DIR}/zsh_src/build/$<CONFIG>")
+        else()
+            set(ZSH_MODULE_TEST_DIR "${CMAKE_SOURCE_DIR}/zsh_src/build")
+        endif()
         add_custom_target(test-zsh
             COMMAND ${CMAKE_COMMAND} -E env
-                "MODULE_DIR=${CMAKE_SOURCE_DIR}/zsh_src/build"
+                "MODULE_DIR=${ZSH_MODULE_TEST_DIR}"
                 zsh "${CMAKE_SOURCE_DIR}/tests/test_zoxide_zsh.sh"
             DEPENDS ${ZSH_MODULE_NAME}
             USES_TERMINAL
         )
         add_custom_target(test-zsh-unload
             COMMAND ${CMAKE_COMMAND} -E env
-                "MODULE_DIR=${CMAKE_SOURCE_DIR}/zsh_src/build"
+                "MODULE_DIR=${ZSH_MODULE_TEST_DIR}"
                 zsh "${CMAKE_SOURCE_DIR}/tests/test_unload_zoxide_zsh.sh"
             DEPENDS ${ZSH_MODULE_NAME}
             USES_TERMINAL

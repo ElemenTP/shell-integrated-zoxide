@@ -161,12 +161,6 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
     return 1;
   }
 
-  const char *path = get_str_param("ZOXIDE_ADD_PATH");
-  if (!path) {
-    zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set", BUILTIN_ZOXIDE_ADD);
-    return 1;
-  }
-
   double score = 1.0;
   const char *score_str = get_str_param("ZOXIDE_ADD_SCORE");
   if (score_str) {
@@ -179,12 +173,36 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
     }
   }
 
-  if (zo_session_add(g_session, path, score) != 0) {
-    report_ffi_error(BUILTIN_ZOXIDE_ADD);
-    return 1;
+  const char *path = get_str_param("ZOXIDE_ADD_PATH");
+  if (path) {
+    if (zo_session_add(g_session, path, score) != 0) {
+      report_ffi_error(BUILTIN_ZOXIDE_ADD);
+      return 1;
+    }
+    return 0;
   }
 
-  return 0;
+  size_t paths_len = 0;
+  char **paths = get_arr_param("ZOXIDE_ADD_PATH", &paths_len);
+  if (paths_len > 0) {
+    int ret = 0;
+    for (size_t i = 0; i < paths_len; i++) {
+      if (zo_session_add(g_session, paths[i], score) != 0) {
+        ret = 1;
+        break;
+      }
+    }
+    freearray(paths);
+    if (ret) {
+      report_ffi_error(BUILTIN_ZOXIDE_ADD);
+      return 1;
+    }
+    return 0;
+  }
+
+  zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set or empty",
+           BUILTIN_ZOXIDE_ADD);
+  return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -243,6 +261,15 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
   if (!g_session) {
     zwarnnam(MODNAME, "%s: session not initialized", BUILTIN_ZOXIDE_REMOVE);
     return 1;
+  }
+
+  const char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
+  if (path) {
+    if (zo_session_remove(g_session, path) != 0) {
+      report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
+      return 1;
+    }
+    return 0;
   }
 
   size_t paths_len = 0;
