@@ -8,7 +8,7 @@
  * Each builtin corresponds to one zoxide subcommand
  * and exchanges all arguments/results through zsh variables:
  *
- *   ZOXIDE_ADD_PATH                → zoxide_add
+ *   ZOXIDE_ADD_PATH                → zoxide_add (scalar or array)
  *   ZOXIDE_ADD_SCORE               → zoxide_add (optional, default 1.0)
  *   ZOXIDE_QUERY_KEYWORDS          → zoxide_query (array)
  *   ZOXIDE_QUERY_EXCLUDE           → zoxide_query
@@ -17,8 +17,9 @@
  *   ZOXIDE_QUERY_INTERACTIVE       → zoxide_query (0/1)
  *   ZOXIDE_QUERY_LIST              → zoxide_query (0/1)
  *   ZOXIDE_QUERY_SCORE             → zoxide_query (0/1)
- *   ZOXIDE_REMOVE_PATHS            → zoxide_remove (array)
- *   ZOXIDE_RESULT                  ← zoxide_query
+ *   ZOXIDE_REMOVE_PATHS            → zoxide_remove (scalar or array)
+ *   ZOXIDE_RESULT                  ← zoxide_query (unset on failure; stderr
+ *                                    mirrors the original zoxide binary)
  *   ZOXIDE_VERSION                 ← zoxide_version
  *   ZOXIDE_STATS_*                 ← zoxide_stats
  *
@@ -146,6 +147,20 @@ static void report_ffi_error(const char *operation) {
     zo_free(err);
 }
 
+/* Report a failed query the same way the original `zoxide` binary does:
+ * `zoxide: <error>` on stderr. SilentExit errors (e.g. fzf Ctrl-C) carry an
+ * empty message and must produce no output at all. */
+static void report_query_error(void) {
+  char *err = NULL;
+  zo_last_error(&err);
+  if (err && *err) {
+    fprintf(stderr, "zoxide: %s\n", err);
+    fflush(stderr);
+  }
+  if (err)
+    zo_free(err);
+}
+
 /* ------------------------------------------------------------------ */
 /* Builtin: zoxide_add                                                */
 /* ------------------------------------------------------------------ */
@@ -173,18 +188,18 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
     }
   }
 
-  const char *path = get_str_param("ZOXIDE_ADD_PATH");
-  if (path) {
-    if (zo_session_add(g_session, path, score) != 0) {
-      report_ffi_error(BUILTIN_ZOXIDE_ADD);
+  /* getaparam() is NULL for scalars and unset parameters, so check it
+   * first. getsparam_u() would join a multi-element array into one string,
+   * which must not be treated as a single path. */
+  if (getaparam((char *)"ZOXIDE_ADD_PATH")) {
+    size_t paths_len = 0;
+    char **paths = get_arr_param("ZOXIDE_ADD_PATH", &paths_len);
+    if (paths_len == 0) {
+      zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH array is empty",
+               BUILTIN_ZOXIDE_ADD);
       return 1;
     }
-    return 0;
-  }
 
-  size_t paths_len = 0;
-  char **paths = get_arr_param("ZOXIDE_ADD_PATH", &paths_len);
-  if (paths_len > 0) {
     int ret = 0;
     for (size_t i = 0; i < paths_len; i++) {
       if (zo_session_add(g_session, paths[i], score) != 0) {
@@ -200,9 +215,17 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
     return 0;
   }
 
-  zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set or empty",
-           BUILTIN_ZOXIDE_ADD);
-  return 1;
+  const char *path = get_str_param("ZOXIDE_ADD_PATH");
+  if (!path) {
+    zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set",
+             BUILTIN_ZOXIDE_ADD);
+    return 1;
+  }
+  if (zo_session_add(g_session, path, score) != 0) {
+    report_ffi_error(BUILTIN_ZOXIDE_ADD);
+    return 1;
+  }
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -211,7 +234,9 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
 
 /**
  * Query the database using the ZOXIDE_QUERY_* variables. On success the result
- * is stored in ZOXIDE_RESULT; on failure it is unset and the builtin returns 1.
+ * is stored in ZOXIDE_RESULT. On failure it is unset and the builtin returns 1;
+ * a non-empty native error is printed as `zoxide: <error>` while empty errors
+ * (fzf Ctrl-C / SilentExit) produce no output, matching the original binary.
  */
 static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
                         UNUSED(Options ops), UNUSED(int func)) {
@@ -240,7 +265,7 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
     freearray(keywords);
   if (ret != 0 || !out) {
     unsetparam((char *)"ZOXIDE_RESULT");
-    report_ffi_error(BUILTIN_ZOXIDE_QUERY);
+    report_query_error();
     return 1;
   }
 
@@ -254,7 +279,8 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
 /* ------------------------------------------------------------------ */
 
 /**
- * Remove every path in the ZOXIDE_REMOVE_PATHS array from the database.
+ * Remove ZOXIDE_REMOVE_PATHS from the database. The variable may be a single
+ * path scalar or an array of paths.
  */
 static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
                          UNUSED(Options ops), UNUSED(int func)) {
@@ -263,30 +289,32 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
     return 1;
   }
 
-  const char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
-  if (path) {
-    if (zo_session_remove(g_session, path) != 0) {
+  /* Same scalar/array distinction as zoxide_add: getaparam() only returns
+   * non-NULL for array parameters. */
+  if (getaparam((char *)"ZOXIDE_REMOVE_PATHS")) {
+    size_t paths_len = 0;
+    char **paths = get_arr_param("ZOXIDE_REMOVE_PATHS", &paths_len);
+    if (paths_len == 0) {
+      return 0;
+    }
+
+    int ret = 0;
+    for (size_t i = 0; i < paths_len; i++) {
+      if (zo_session_remove(g_session, paths[i]) != 0) {
+        ret = 1;
+        break;
+      }
+    }
+    freearray(paths);
+    if (ret) {
       report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
       return 1;
     }
     return 0;
   }
 
-  size_t paths_len = 0;
-  char **paths = get_arr_param("ZOXIDE_REMOVE_PATHS", &paths_len);
-  if (paths_len == 0) {
-    return 0;
-  }
-
-  int ret = 0;
-  for (size_t i = 0; i < paths_len; i++) {
-    if (zo_session_remove(g_session, paths[i]) != 0) {
-      ret = 1;
-      break;
-    }
-  }
-  freearray(paths);
-  if (ret) {
+  const char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
+  if (path && zo_session_remove(g_session, path) != 0) {
     report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
     return 1;
   }

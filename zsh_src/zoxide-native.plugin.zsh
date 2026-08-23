@@ -176,6 +176,8 @@ function __zoxide_z() {
     ZOXIDE_QUERY_EXCLUDE="$PWD"
     if __zoxide_query "$@"; then
       __zoxide_cd "${ZOXIDE_RESULT}"
+    else
+      return 1
     fi
   fi
 }
@@ -190,6 +192,8 @@ function __zoxide_zi() {
   typeset -g ZOXIDE_QUERY_SCORE=0
   if __zoxide_query "$@"; then
     __zoxide_cd "${ZOXIDE_RESULT}"
+  else
+    return 1
   fi
 }
 
