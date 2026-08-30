@@ -12,7 +12,8 @@ namespace ZoxideNative;
 /// those variables via <c>getenv()</c> / <c>std::env::var()</c>.
 ///
 /// Use <c>Set-ZoxideEnv</c> from the module (or this class directly) for any
-/// <c>_ZO_*</c> variable that the embedded library must read.
+/// variable the embedded library must read. This includes <c>_ZO_*</c>
+/// configuration and <c>PATH</c> (used to locate <c>fzf</c>).
 /// </summary>
 public static partial class ZoxideEnvironment
 {

@@ -142,11 +142,8 @@ build
 .vscode
 
 # Build dirs
-starship
+zoxide
 zsh-*
-
-# local cargo dependency cache
-.cargo-home/
 
 # CMake install staging
 /prefix/

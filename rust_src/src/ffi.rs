@@ -124,8 +124,11 @@ fn cstr_to_option_string(ptr: *const c_char) -> Option<String> {
 }
 
 fn cstr_array_to_vec(ptr: *const *const c_char, len: usize) -> Option<Vec<String>> {
-    if ptr.is_null() || len == 0 {
+    if len == 0 {
         return Some(Vec::new());
+    }
+    if ptr.is_null() {
+        return None;
     }
     let mut result = Vec::with_capacity(len);
     // SAFETY: `ptr` points to `len` valid `char *` values, all readable for the
@@ -164,10 +167,12 @@ fn string_into_c(value: String) -> *mut c_char {
 // Public C API
 // ---------------------------------------------------------------------------
 
-/// Create a new zoxide session and open the database.
+/// Create a new zoxide session handle.
 ///
-/// Returns a non-null opaque pointer on success, or null on failure
-/// (check `zo_last_error()`).
+/// The handle only tracks per-session counters; each add/query/remove opens
+/// and closes `db.zo` itself, so cross-shell updates are never overwritten by
+/// stale in-memory state. Returns a non-null opaque pointer on success, or
+/// null on failure (check `zo_last_error()`).
 #[unsafe(no_mangle)]
 pub extern "C" fn zo_session_create() -> *mut SessionHandle {
     ffi_guard!(
@@ -192,7 +197,7 @@ pub extern "C" fn zo_session_create() -> *mut SessionHandle {
 ///
 /// Passing NULL is safe (no-op).
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_session_destroy(handle: *mut SessionHandle) {
+pub unsafe extern "C" fn zo_session_destroy(handle: *mut SessionHandle) {
     if handle.is_null() {
         return;
     }
@@ -213,7 +218,7 @@ pub extern "C" fn zo_session_destroy(handle: *mut SessionHandle) {
 /// Returns 0 on success. `score` is the frecency increment (use 1.0 for the
 /// standard shell hook).
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_session_add(
+pub unsafe extern "C" fn zo_session_add(
     handle: *mut SessionHandle,
     path: *const c_char,
     score: c_double,
@@ -246,7 +251,10 @@ pub extern "C" fn zo_session_add(
 ///
 /// Returns 0 on success, <0 if the path is not in the database.
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_session_remove(handle: *mut SessionHandle, path: *const c_char) -> c_int {
+pub unsafe extern "C" fn zo_session_remove(
+    handle: *mut SessionHandle,
+    path: *const c_char,
+) -> c_int {
     ffi_guard!(
         {
             if handle.is_null() || path.is_null() {
@@ -273,16 +281,29 @@ pub extern "C" fn zo_session_remove(handle: *mut SessionHandle, path: *const c_c
 ///
 /// On success, returns 0 and writes a Rust-allocated UTF-8 string to `*out`.
 /// The caller must free `*out` with `zo_free()`.
-/// On failure, returns a negative value; check `zo_last_error()`.
+/// On failure, returns a negative value, sets `*out` to NULL and records the
+/// error in `zo_last_error()`.
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_session_query(
+pub unsafe extern "C" fn zo_session_query(
     handle: *mut SessionHandle,
     options: *const zo_query_options,
     out: *mut *mut c_char,
 ) -> c_int {
     ffi_guard!(
         {
-            if handle.is_null() || options.is_null() || out.is_null() {
+            if out.is_null() {
+                set_error("zo_session_query: null argument");
+                return -1;
+            }
+
+            // Always reset the caller's output slot before any other
+            // validation. On failure the caller may otherwise keep a
+            // stale/dangling pointer from a previous call.
+            // SAFETY: `out` was checked non-null above and is writable for the
+            // duration of this call.
+            unsafe { *out = ptr::null_mut() };
+
+            if handle.is_null() || options.is_null() {
                 set_error("zo_session_query: null argument");
                 return -1;
             }
@@ -344,7 +365,7 @@ pub extern "C" fn zo_session_query(
 ///
 /// Returns 0 on success.
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_session_stats(handle: *mut SessionHandle, out: *mut zo_stats) -> c_int {
+pub unsafe extern "C" fn zo_session_stats(handle: *mut SessionHandle, out: *mut zo_stats) -> c_int {
     ffi_guard!(
         {
             if handle.is_null() || out.is_null() {
@@ -357,11 +378,18 @@ pub extern "C" fn zo_session_stats(handle: *mut SessionHandle, out: *mut zo_stat
                 queries,
                 removes,
             } = handle.session.stats();
+            let entries = match handle.session.entry_count() {
+                Ok(entries) => entries as u64,
+                Err(e) => {
+                    set_error(&format!("{e:#}"));
+                    return -1;
+                }
+            };
             let stats = zo_stats {
                 adds,
                 queries,
                 removes,
-                entries: handle.session.entry_count() as u64,
+                entries,
             };
             // SAFETY: `out` is writable for the duration of this call.
             unsafe { *out = stats };
@@ -374,7 +402,7 @@ pub extern "C" fn zo_session_stats(handle: *mut SessionHandle, out: *mut zo_stat
 /// Free a string previously returned by `zo_session_query` or
 /// `zo_last_error`. Passing NULL is safe (no-op).
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn zo_free(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
@@ -407,7 +435,7 @@ pub extern "C" fn zo_version() -> *const c_char {
 /// The caller must free `*out` with `zo_free()`. `*out` is set to NULL when no
 /// error has been recorded.
 #[unsafe(no_mangle)]
-pub extern "C" fn zo_last_error(out: *mut *mut c_char) {
+pub unsafe extern "C" fn zo_last_error(out: *mut *mut c_char) {
     if out.is_null() {
         return;
     }
@@ -458,13 +486,13 @@ mod tests {
         let _guard = test_lock();
         let data_dir = tempfile::tempdir().unwrap();
         let handle = session(data_dir.path());
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
     fn test_destroy_null_is_safe() {
         let _guard = test_lock();
-        zo_session_destroy(ptr::null_mut());
+        unsafe { zo_session_destroy(ptr::null_mut()) };
     }
 
     #[test]
@@ -474,12 +502,12 @@ mod tests {
         let handle = session(data_dir.path());
         let mut out: *mut c_char = ptr::null_mut();
 
-        assert!(zo_session_add(handle, ptr::null(), 1.0) < 0);
-        assert!(zo_session_remove(handle, ptr::null()) < 0);
-        assert!(zo_session_query(handle, ptr::null(), &mut out) < 0);
-        assert!(zo_session_query(ptr::null_mut(), ptr::null(), &mut out) < 0);
+        assert!(unsafe { zo_session_add(handle, ptr::null(), 1.0) } < 0);
+        assert!(unsafe { zo_session_remove(handle, ptr::null()) } < 0);
+        assert!(unsafe { zo_session_query(handle, ptr::null(), &mut out) } < 0);
+        assert!(unsafe { zo_session_query(ptr::null_mut(), ptr::null(), &mut out) } < 0);
 
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
@@ -490,7 +518,7 @@ mod tests {
         let handle = session(data_dir.path());
         let path = cstr(target.path().to_str().unwrap());
 
-        assert_eq!(zo_session_add(handle, path.as_ptr(), 1.0), 0);
+        assert_eq!(unsafe { zo_session_add(handle, path.as_ptr(), 1.0) }, 0);
 
         let keyword = cstr(target.path().file_name().unwrap().to_str().unwrap());
         let keywords = [keyword.as_ptr()];
@@ -506,13 +534,16 @@ mod tests {
         };
 
         let mut out: *mut c_char = ptr::null_mut();
-        assert_eq!(zo_session_query(handle, &options as *const _, &mut out), 0);
+        assert_eq!(
+            unsafe { zo_session_query(handle, &options as *const _, &mut out) },
+            0
+        );
         assert!(!out.is_null());
         let result = unsafe { CStr::from_ptr(out) }.to_str().unwrap();
         assert!(result.ends_with(target.path().file_name().unwrap().to_str().unwrap()));
-        zo_free(out);
+        unsafe { zo_free(out) };
 
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
@@ -522,7 +553,7 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let handle = session(data_dir.path());
         let path = cstr(target.path().to_str().unwrap());
-        zo_session_add(handle, path.as_ptr(), 1.0);
+        unsafe { zo_session_add(handle, path.as_ptr(), 1.0) };
 
         let options = zo_query_options {
             keywords: ptr::null(),
@@ -535,17 +566,20 @@ mod tests {
             score: 0,
         };
         let mut out: *mut c_char = ptr::null_mut();
-        assert_eq!(zo_session_query(handle, &options as *const _, &mut out), 0);
+        assert_eq!(
+            unsafe { zo_session_query(handle, &options as *const _, &mut out) },
+            0
+        );
         assert!(!out.is_null());
-        zo_free(out);
+        unsafe { zo_free(out) };
 
         let mut stats = zo_stats::default();
-        assert_eq!(zo_session_stats(handle, &mut stats as *mut _), 0);
+        assert_eq!(unsafe { zo_session_stats(handle, &mut stats as *mut _) }, 0);
         assert_eq!(stats.adds, 1);
         assert_eq!(stats.queries, 1);
         assert_eq!(stats.entries, 1);
 
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
@@ -560,11 +594,11 @@ mod tests {
         );
 
         let mut out: *mut c_char = ptr::null_mut();
-        zo_last_error(&mut out);
+        unsafe { zo_last_error(&mut out) };
         assert!(out.is_null(), "no error recorded before first call");
 
-        assert!(zo_session_query(ptr::null_mut(), ptr::null(), &mut out) < 0);
-        zo_last_error(&mut out);
+        assert!(unsafe { zo_session_query(ptr::null_mut(), ptr::null(), &mut out) } < 0);
+        unsafe { zo_last_error(&mut out) };
         assert!(
             !out.is_null(),
             "error should be available after a failing call"
@@ -573,7 +607,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert!(!message.is_empty());
-        zo_free(out);
+        unsafe { zo_free(out) };
     }
 
     #[test]
@@ -584,14 +618,14 @@ mod tests {
         let handle = session(data_dir.path());
         let path = cstr(target.path().to_str().unwrap());
 
-        zo_session_add(handle, path.as_ptr(), 1.0);
-        assert_eq!(zo_session_remove(handle, path.as_ptr()), 0);
+        unsafe { zo_session_add(handle, path.as_ptr(), 1.0) };
+        assert_eq!(unsafe { zo_session_remove(handle, path.as_ptr()) }, 0);
 
         let mut stats = zo_stats::default();
-        zo_session_stats(handle, &mut stats as *mut _);
+        unsafe { zo_session_stats(handle, &mut stats as *mut _) };
         assert_eq!(stats.entries, 0);
 
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
@@ -610,12 +644,12 @@ mod tests {
             score: 0,
         };
         let mut out: *mut c_char = ptr::null_mut();
-        assert!(zo_session_query(handle, &options as *const _, &mut out) < 0);
+        assert!(unsafe { zo_session_query(handle, &options as *const _, &mut out) } < 0);
 
-        zo_last_error(&mut out);
+        unsafe { zo_last_error(&mut out) };
         assert!(!out.is_null());
-        zo_free(out);
-        zo_session_destroy(handle);
+        unsafe { zo_free(out) };
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
@@ -625,8 +659,8 @@ mod tests {
         let handle = session(data_dir.path());
         let invalid = CString::new(vec![0xff, b'x']).unwrap();
 
-        assert!(zo_session_add(handle, invalid.as_ptr(), 1.0) < 0);
-        zo_last_error(&mut ptr::null_mut()); // NULL out is tolerated
+        assert!(unsafe { zo_session_add(handle, invalid.as_ptr(), 1.0) } < 0);
+        unsafe { zo_last_error(&mut ptr::null_mut()) }; // NULL out is tolerated
         let options = zo_query_options {
             keywords: ptr::null(),
             keywords_len: 0,
@@ -638,14 +672,72 @@ mod tests {
             score: 0,
         };
         let mut out: *mut c_char = ptr::null_mut();
-        assert!(zo_session_query(handle, &options as *const _, &mut out) < 0);
+        assert!(unsafe { zo_session_query(handle, &options as *const _, &mut out) } < 0);
 
-        zo_session_destroy(handle);
+        unsafe { zo_session_destroy(handle) };
+    }
+
+    #[test]
+    fn test_query_failure_clears_output_slot() {
+        let _guard = test_lock();
+        let data_dir = tempfile::tempdir().unwrap();
+        let handle = session(data_dir.path());
+
+        let options = zo_query_options {
+            keywords: ptr::null(),
+            keywords_len: 0,
+            exclude: ptr::null(),
+            base_dir: ptr::null(),
+            all: 0,
+            interactive: 0,
+            list: 0,
+            score: 0,
+        };
+        let sentinel = cstr("stale-pointer");
+        let mut out: *mut c_char = sentinel.as_ptr() as *mut c_char;
+        assert!(unsafe { zo_session_query(handle, &options as *const _, &mut out) } < 0);
+        assert!(
+            out.is_null(),
+            "a failed query must clear the caller's output slot"
+        );
+
+        unsafe { zo_session_destroy(handle) };
+    }
+
+    #[test]
+    fn test_null_keyword_array_with_positive_len_is_rejected() {
+        let _guard = test_lock();
+        let data_dir = tempfile::tempdir().unwrap();
+        let handle = session(data_dir.path());
+
+        let options = zo_query_options {
+            keywords: ptr::null(),
+            keywords_len: 1,
+            exclude: ptr::null(),
+            base_dir: ptr::null(),
+            all: 0,
+            interactive: 0,
+            list: 0,
+            score: 0,
+        };
+        let mut out: *mut c_char = ptr::null_mut();
+        assert!(unsafe { zo_session_query(handle, &options as *const _, &mut out) } < 0);
+
+        let mut error: *mut c_char = ptr::null_mut();
+        unsafe { zo_last_error(&mut error) };
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(message.contains("invalid keywords array"), "{message}");
+        unsafe { zo_free(error) };
+
+        unsafe { zo_session_destroy(handle) };
     }
 
     #[test]
     fn test_free_null_is_safe() {
         let _guard = test_lock();
-        zo_free(ptr::null_mut());
+        unsafe { zo_free(ptr::null_mut()) };
     }
 }

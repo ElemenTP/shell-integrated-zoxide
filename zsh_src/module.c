@@ -88,13 +88,15 @@ static zo_session_t *g_session = NULL;
  *
  * getsparam() returns zsh's internal metafied representation (bytes >= 0x80
  * are escaped with the Meta character). getsparam_u() returns an unmetafied
- * copy in a static buffer, which is exactly what the Rust FFI expects for
- * paths containing emoji or other multi-byte UTF-8. */
-static const char *get_str_param(const char *name) {
+ * copy in a STATIC buffer that is invalidated by the next getsparam_u() call,
+ * so duplicate it with ztrdup() and let the caller release it with zsfree().
+ * This matters for queries where two non-ASCII scalars (exclude/base_dir) are
+ * read back-to-back. */
+static char *get_str_param(const char *name) {
   char *val = getsparam_u((char *)name);
   if (!val || !*val)
     return NULL;
-  return val;
+  return ztrdup(val);
 }
 
 /* Read a zsh integer parameter. Returns 0 when unset. */
@@ -177,15 +179,17 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
   }
 
   double score = 1.0;
-  const char *score_str = get_str_param("ZOXIDE_ADD_SCORE");
+  char *score_str = get_str_param("ZOXIDE_ADD_SCORE");
   if (score_str) {
     char *end = NULL;
     score = strtod(score_str, &end);
     if (end == score_str || *end != '\0') {
       zwarnnam(MODNAME, "%s: invalid ZOXIDE_ADD_SCORE: %s", BUILTIN_ZOXIDE_ADD,
                score_str);
+      zsfree(score_str);
       return 1;
     }
+    zsfree(score_str);
   }
 
   /* getaparam() is NULL for scalars and unset parameters, so check it
@@ -215,13 +219,15 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
     return 0;
   }
 
-  const char *path = get_str_param("ZOXIDE_ADD_PATH");
+  char *path = get_str_param("ZOXIDE_ADD_PATH");
   if (!path) {
     zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set",
              BUILTIN_ZOXIDE_ADD);
     return 1;
   }
-  if (zo_session_add(g_session, path, score) != 0) {
+  int ret = zo_session_add(g_session, path, score);
+  zsfree(path);
+  if (ret != 0) {
     report_ffi_error(BUILTIN_ZOXIDE_ADD);
     return 1;
   }
@@ -248,12 +254,15 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
   size_t keywords_len = 0;
   char **keywords = get_arr_param("ZOXIDE_QUERY_KEYWORDS", &keywords_len);
 
+  char *exclude = get_str_param("ZOXIDE_QUERY_EXCLUDE");
+  char *base_dir = get_str_param("ZOXIDE_QUERY_BASE_DIR");
+
   zo_query_options_t options;
   memset(&options, 0, sizeof(options));
   options.keywords = (const char *const *)keywords;
   options.keywords_len = keywords_len;
-  options.exclude = get_str_param("ZOXIDE_QUERY_EXCLUDE");
-  options.base_dir = get_str_param("ZOXIDE_QUERY_BASE_DIR");
+  options.exclude = exclude;
+  options.base_dir = base_dir;
   options.all = get_int_param("ZOXIDE_QUERY_ALL") != 0;
   options.interactive = get_int_param("ZOXIDE_QUERY_INTERACTIVE") != 0;
   options.list = get_int_param("ZOXIDE_QUERY_LIST") != 0;
@@ -261,6 +270,8 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
 
   char *out = NULL;
   int ret = zo_session_query(g_session, &options, &out);
+  zsfree(exclude);
+  zsfree(base_dir);
   if (keywords_len > 0)
     freearray(keywords);
   if (ret != 0 || !out) {
@@ -313,10 +324,14 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
     return 0;
   }
 
-  const char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
-  if (path && zo_session_remove(g_session, path) != 0) {
-    report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
-    return 1;
+  char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
+  if (path) {
+    int ret = zo_session_remove(g_session, path);
+    zsfree(path);
+    if (ret != 0) {
+      report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
+      return 1;
+    }
   }
   return 0;
 }
@@ -340,7 +355,7 @@ static int bin_zo_version(UNUSED(char *name), char **argv, UNUSED(Options ops),
   setsparam((char *)"ZOXIDE_VERSION", ztrdup(version));
 
   if (!quiet) {
-    printf("%s", version);
+    printf("%s\n", version);
   }
 
   return 0;

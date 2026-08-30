@@ -8,8 +8,11 @@
 //!
 //! The repo-root `zoxide` symlink points at the zoxide `in-process` checkout.
 //! `Cargo.toml` consumes it as a normal path dependency with the
-//! `in-process` feature, which exposes `zoxide::session::Session` and its
-//! single-threaded database operations.
+//! `in-process` feature, which exposes `zoxide::session::Session`. `Session`
+//! deliberately does not keep the database open: every add/query/remove
+//! constructs the same command structs as the zoxide CLI and opens/closes
+//! `db.zo` per command, so updates from other shells are never overwritten
+//! with stale in-memory state.
 //!
 //! # Safety
 //!

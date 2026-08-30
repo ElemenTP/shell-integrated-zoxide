@@ -45,7 +45,7 @@ int zo_session_add(zo_session_t *session, const char *path, double score);
 int zo_session_remove(zo_session_t *session, const char *path);
 
 /* Run a query. On success (0), *out is a Rust-allocated UTF-8 string.
- * The caller must free it with zo_free(). */
+ * The caller must free it with zo_free(). On failure *out is set to NULL. */
 int zo_session_query(zo_session_t *session, const zo_query_options_t *options,
                      char **out);
 

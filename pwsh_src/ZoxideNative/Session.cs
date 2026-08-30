@@ -31,9 +31,10 @@ public sealed class QueryResult
 /// <summary>
 /// Safe managed wrapper around the zoxide-ffi native session.
 ///
-/// The session keeps the zoxide database open in unmanaged memory for the
-/// lifetime of the pwsh process. All calls are single-threaded; no fork guard
-/// or thread-pool shutdown is needed.
+/// The native session handle only tracks per-session counters. Each Add /
+/// Query / Remove call opens and closes the zoxide database, matching the
+/// original binary's cross-process behavior. All calls are single-threaded;
+/// no fork guard or thread-pool shutdown is needed.
 /// </summary>
 public sealed class Session : IDisposable
 {

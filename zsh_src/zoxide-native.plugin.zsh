@@ -25,11 +25,11 @@
 #   ZOXIDE_QUERY_*                          → zoxide_query
 #   ZOXIDE_RESULT                           ← zoxide_query
 
-# Prevent double-loading
-if ((${+_ZOXIDE_NATIVE_LOADED})); then
+# Prevent double-loading. The marker is only set after zmodload succeeds, so
+# a failed source can be retried after the user fixes ZOXIDE_NATIVE_DIR.
+if (( ${+_ZOXIDE_NATIVE_LOADED} )); then
   return 0
 fi
-typeset -g _ZOXIDE_NATIVE_LOADED=1
 
 # Locate this script's directory (works under any plugin manager).
 0="${${ZERO:-${0:#$ZSH_ARGZERO}}:-${(%):-%N}}"
@@ -42,12 +42,12 @@ typeset -g _ZOXIDE_NATIVE_SCRIPT_DIR="${0:h}"
 _zoxide_native_mods=(zoxide_native.so)
 
 case "${OSTYPE:-}" in
-darwin*)
-  _zoxide_native_ffis=(libzoxide_ffi.dylib)
-  ;;
-*)
-  _zoxide_native_ffis=(libzoxide_ffi.so)
-  ;;
+  darwin*)
+    _zoxide_native_ffis=(libzoxide_ffi.dylib)
+    ;;
+  *)
+    _zoxide_native_ffis=(libzoxide_ffi.so)
+    ;;
 esac
 
 typeset -ga _zoxide_native_dirs
@@ -64,7 +64,6 @@ _zoxide_native_dirs+=(
 )
 
 typeset -g ZOXIDE_NATIVE_DIR=""
-typeset -g ZOXIDE_NATIVE_FFI=""
 
 typeset _dir _mod _ffi _found=0
 for _dir in "${_zoxide_native_dirs[@]}"; do
@@ -75,15 +74,16 @@ for _dir in "${_zoxide_native_dirs[@]}"; do
       _found=1
       for _ffi in "${_zoxide_native_ffis[@]}"; do
         if [[ -f "$_dir/$_ffi" ]]; then
-          ZOXIDE_NATIVE_FFI="$_dir/$_ffi"
           break
         fi
       done
       break
     fi
   done
-  ((_found)) && break
+  (( _found )) && break
 done
+unset _ZOXIDE_NATIVE_SCRIPT_DIR _zoxide_native_mods _zoxide_native_ffis \
+      _zoxide_native_dirs _dir _mod _ffi _found
 
 if [[ -z "$ZOXIDE_NATIVE_DIR" ]]; then
   print -u2 "zoxide-native: compiled module (zoxide_native) not found."
@@ -91,7 +91,6 @@ if [[ -z "$ZOXIDE_NATIVE_DIR" ]]; then
   print -u2 "    cmake -B build -S . && cmake --build build --config Release"
   print -u2 "    cmake --install build --config Release --prefix \$HOME/.local"
   print -u2 "  Or point ZOXIDE_NATIVE_DIR at the installed lib/zsh directory."
-  unset _zoxide_native_dirs _zoxide_native_mods _zoxide_native_ffis
   return 1
 fi
 
@@ -101,6 +100,8 @@ zmodload zoxide_native || {
   print -u2 "zoxide-native: failed to load zoxide_native from $ZOXIDE_NATIVE_DIR"
   return 1
 }
+
+typeset -g _ZOXIDE_NATIVE_LOADED=1
 
 # ---- The rest is adapted from zoxide init zsh -------------------------------
 
@@ -129,14 +130,10 @@ function __zoxide_hook() {
   zoxide_add
 }
 
-# Initialize hook.
-\builtin typeset -ga precmd_functions
+# Add hook functions
 \builtin typeset -ga chpwd_functions
-# shellcheck disable=SC2034,SC2296
-precmd_functions=("${(@)precmd_functions:#__zoxide_hook}")
-# shellcheck disable=SC2034,SC2296
-chpwd_functions=("${(@)chpwd_functions:#__zoxide_hook}")
-chpwd_functions+=(__zoxide_hook)
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd __zoxide_hook
 
 # Report common issues (mirrors `zoxide init zsh`).
 function __zoxide_doctor() {

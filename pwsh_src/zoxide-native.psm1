@@ -6,8 +6,9 @@
 .DESCRIPTION
     This module mirrors the official `zoxide init powershell` script, replacing
     the `zoxide add` / `zoxide query` process invocations with the in-process
-    [ZoxideNative.Session] managed wrapper. The zoxide database stays open for
-    the lifetime of the pwsh process.
+    [ZoxideNative.Session] managed wrapper. Like the original binary, every
+    command opens and closes the database, so updates from other shells are
+    picked up by the next command.
 
     The native library (libzoxide_ffi.so / libzoxide_ffi.dylib /
     zoxide_ffi.dll) must be present next to ZoxideNative.dll. To load it from
