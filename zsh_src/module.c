@@ -23,6 +23,11 @@
  *   ZOXIDE_VERSION                 ← zoxide_version
  *   ZOXIDE_STATS_*                 ← zoxide_stats
  *
+ * Error reporting (see ffi.h for the full contract): every call that can fail
+ * returns its error message directly (NULL = success). Failed builtins print
+ * the returned message with the operation name and release it with zo_free();
+ * an empty message means "failed silently" (fzf Ctrl-C) and prints nothing.
+ *
  * Loading in zsh:
  *   module_path+=(/path/to/zoxide_native)
  *   zmodload zoxide_native
@@ -140,10 +145,9 @@ static void set_str_param(const char *name, const char *val) {
   setsparam((char *)name, ztrdup_metafy(val));
 }
 
-/* Report an FFI failure using the Rust-side last-error string. */
-static void report_ffi_error(const char *operation) {
-  char *err = NULL;
-  zo_last_error(&err);
+/* Report an FFI failure. `err` is the message returned by the failed call
+ * (never NULL when called); this function takes ownership of it. */
+static void report_ffi_error(const char *operation, char *err) {
   zwarnnam(MODNAME, "%s: %s", operation, err ? err : "unknown error");
   if (err)
     zo_free(err);
@@ -151,10 +155,8 @@ static void report_ffi_error(const char *operation) {
 
 /* Report a failed query the same way the original `zoxide` binary does:
  * `zoxide: <error>` on stderr. SilentExit errors (e.g. fzf Ctrl-C) carry an
- * empty message and must produce no output at all. */
-static void report_query_error(void) {
-  char *err = NULL;
-  zo_last_error(&err);
+ * empty message and must produce no output at all. Takes ownership of `err`. */
+static void report_query_error(char *err) {
   if (err && *err) {
     fprintf(stderr, "zoxide: %s\n", err);
     fflush(stderr);
@@ -204,16 +206,15 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
       return 1;
     }
 
-    int ret = 0;
+    char *err = NULL;
     for (size_t i = 0; i < paths_len; i++) {
-      if (zo_session_add(g_session, paths[i], score) != 0) {
-        ret = 1;
+      err = zo_session_add(g_session, paths[i], score);
+      if (err)
         break;
-      }
     }
     freearray(paths);
-    if (ret) {
-      report_ffi_error(BUILTIN_ZOXIDE_ADD);
+    if (err) {
+      report_ffi_error(BUILTIN_ZOXIDE_ADD, err);
       return 1;
     }
     return 0;
@@ -225,10 +226,10 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
              BUILTIN_ZOXIDE_ADD);
     return 1;
   }
-  int ret = zo_session_add(g_session, path, score);
+  char *err = zo_session_add(g_session, path, score);
   zsfree(path);
-  if (ret != 0) {
-    report_ffi_error(BUILTIN_ZOXIDE_ADD);
+  if (err) {
+    report_ffi_error(BUILTIN_ZOXIDE_ADD, err);
     return 1;
   }
   return 0;
@@ -269,14 +270,22 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
   options.score = get_int_param("ZOXIDE_QUERY_SCORE") != 0;
 
   char *out = NULL;
-  int ret = zo_session_query(g_session, &options, &out);
+  char *err = zo_session_query(g_session, &options, &out);
   zsfree(exclude);
   zsfree(base_dir);
   if (keywords_len > 0)
     freearray(keywords);
-  if (ret != 0 || !out) {
+  if (err) {
     unsetparam((char *)"ZOXIDE_RESULT");
-    report_query_error();
+    report_query_error(err);
+    return 1;
+  }
+  if (!out) {
+    /* Contract: a successful query always yields a result string, so this
+     * can only mean a library bug — report it instead of using stale state. */
+    unsetparam((char *)"ZOXIDE_RESULT");
+    zwarnnam(MODNAME, "%s: native query returned no output",
+             BUILTIN_ZOXIDE_QUERY);
     return 1;
   }
 
@@ -309,16 +318,15 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
       return 0;
     }
 
-    int ret = 0;
+    char *err = NULL;
     for (size_t i = 0; i < paths_len; i++) {
-      if (zo_session_remove(g_session, paths[i]) != 0) {
-        ret = 1;
+      err = zo_session_remove(g_session, paths[i]);
+      if (err)
         break;
-      }
     }
     freearray(paths);
-    if (ret) {
-      report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
+    if (err) {
+      report_ffi_error(BUILTIN_ZOXIDE_REMOVE, err);
       return 1;
     }
     return 0;
@@ -326,10 +334,10 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
 
   char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
   if (path) {
-    int ret = zo_session_remove(g_session, path);
+    char *err = zo_session_remove(g_session, path);
     zsfree(path);
-    if (ret != 0) {
-      report_ffi_error(BUILTIN_ZOXIDE_REMOVE);
+    if (err) {
+      report_ffi_error(BUILTIN_ZOXIDE_REMOVE, err);
       return 1;
     }
   }
@@ -384,8 +392,9 @@ static int bin_zo_stats(UNUSED(char *name), char **argv, UNUSED(Options ops),
 
   zo_stats_t stats;
   memset(&stats, 0, sizeof(stats));
-  if (zo_session_stats(g_session, &stats) != 0) {
-    report_ffi_error(BUILTIN_ZOXIDE_STATS);
+  char *err = zo_session_stats(g_session, &stats);
+  if (err) {
+    report_ffi_error(BUILTIN_ZOXIDE_STATS, err);
     return 1;
   }
 
@@ -433,14 +442,17 @@ int enables_(Module m, int **enables) {
 
 /**/
 int boot_(UNUSED(Module m)) {
-  g_session = zo_session_create();
+  /* zo_session_create writes the handle to *out and returns the error, if
+   * any (NULL = success). g_session is left NULL on failure so the builtins
+   * refuse to run. */
+  char *err = zo_session_create(&g_session);
+  if (err) {
+    zwarnnam(MODNAME, "failed to create session: %s", err);
+    zo_free(err);
+    return 1;
+  }
   if (!g_session) {
-    char *err = NULL;
-    zo_last_error(&err);
-    zwarnnam(MODNAME, "failed to create session: %s",
-             err ? err : "unknown error");
-    if (err)
-      zo_free(err);
+    zwarnnam(MODNAME, "failed to create session: unknown error");
     return 1;
   }
   return 0;
@@ -449,7 +461,13 @@ int boot_(UNUSED(Module m)) {
 /**/
 int cleanup_(Module m) {
   if (g_session) {
-    zo_session_destroy(g_session);
+    /* Destroy reports an error only if dropping the session panicked; there
+     * is nothing to retry, but surface it so the bug is visible. */
+    char *err = zo_session_destroy(g_session);
+    if (err) {
+      zwarnnam(MODNAME, "failed to destroy session: %s", err);
+      zo_free(err);
+    }
     g_session = NULL;
   }
 

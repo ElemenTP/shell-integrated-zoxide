@@ -66,12 +66,60 @@ Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
 这样 shell 模块拿到 `ZOXIDE_RESULT` 后可以直接 `cd`，行为等价于原版
 `$(zoxide query ...)` 命令替换。
 
-### 2.3 panic 隔离与错误记录
+### 2.3 panic 隔离与"错误即返回值"
 
-- 所有导出函数包裹 `catch_unwind`
-- `LAST_ERROR` 是全局 `Mutex<Option<CString>>`，不使用 `thread_local!`
-  （避免 macOS/Windows 在宿主线程退出时调用已卸载 DSO 的 TLS destructor）
-- 只有 `zo_session_query` / `zo_last_error` 的返回值需要 `zo_free`
+- 所有可失败的导出函数包裹 `catch_unwind`（`ffi_guard_error!`，辅助函数
+  `string_into_c` / `error_string` / `panic_to_error` 与
+  shell-integrated-starship 保持一致），panic 不会越过 FFI 边界：捕获到的
+  panic 消息被格式化成错误字符串，按普通错误返回。
+- 错误不存储，而是**直接从失败的调用返回**：`NULL` = 成功，非 NULL 指针 =
+  Rust 分配的 UTF-8 错误消息，调用方用 `zo_free` 释放。演进过程是
+  "全局错误槽 → 每个 session 一个错误槽 + 全局兜底 → 返回值"，前两版都
+  需要靠约定（谁清空、谁覆盖、读完还在不在）来避免读到别的调用的错误；
+  返回值把这条约定从设计里彻底去掉：
+
+  ```c
+  // C / zsh module.c：错误由这次调用自己返回
+  char *err = zo_session_add(g_session, path, 1.0);
+  if (err) {
+      zwarnnam(MODNAME, "%s: %s", op, err);
+      zo_free(err);
+  }
+  ```
+
+  ```csharp
+  // pwsh Session.cs（托管侧）
+  IntPtr error = NativeMethods.SessionAdd(_handle, path, score);
+  if (error != IntPtr.Zero) {
+      throw new InvalidOperationException($"zoxide add failed: {TakeError(error)}");
+  }
+  ```
+
+- 由此得到的性质：**没有共享错误状态**，不同 session / 不同线程并发失败
+  时各自拿到自己的消息（不需要锁，`SessionHandle` 里的 `Mutex` 也删掉了）；
+  不存在"上一次的错误还留在槽里"；也不存在 `thread_local!` 的 TLS
+  destructor 在 `dlclose()` 之后被宿主线程调用的问题（macOS/Windows 没有
+  glibc 的卸载保护），因为压根没有长期存在的错误存储。
+- **空消息 ≠ 成功**：`SilentExit`（fzf Ctrl-C）返回指向空字符串的非 NULL
+  指针，调用方先判断指针、再判断内容：
+
+  ```c
+  if (err) {
+      if (*err) fprintf(stderr, "zoxide: %s\n", err);  /* 空消息则静默 */
+      zo_free(err);
+      return 1;
+  }
+  ```
+
+- `zo_session_create` 的载荷是 handle，因此签名是
+  `char *zo_session_create(zo_session_t **out)`：成功返回 NULL 并写入
+  handle，失败返回错误消息并把 `*out` 置 NULL。
+- `zo_session_destroy` 同样返回错误字符串：销毁本身不可失败，只有析构
+  panic 会走到错误分支，返回值纯粹是诊断信息（zsh `cleanup_` 打印后释放，
+  pwsh `Dispose` 释放，C 系统测试断言为 NULL），便于定位此类 bug。
+  `zo_free` 才是唯一没有错误返回的导出（释放不可能失败）。
+- `zo_session_query` 成功时 `*out` 是结果字符串、失败时 `*out` 被置 NULL
+  （两种情况都要 `zo_free`：结果是结果，错误消息本身也是分配出来的）。
 
 ### 2.4 为什么没有 fork guard
 
@@ -163,9 +211,10 @@ freearray(copy);
 
 ### 3.4 卸载安全
 
-`cleanup_` 只做 `zo_session_destroy` + `setfeatureenables(..., NULL)`。
-没有线程池需要 shutdown。`tests/test_unload_zoxide_zsh.sh` 连续三轮
-`zmodload -u` / `zmodload` 验证会话能重新创建。
+`cleanup_` 做 `zo_session_destroy`（返回的析构诊断信息打印后 `zo_free`）+
+`setfeatureenables(..., NULL)`。没有线程池需要 shutdown。
+`tests/test_unload_zoxide_zsh.sh` 连续三轮 `zmodload -u` / `zmodload` 验证
+会话能重新创建。
 
 ## 4. PowerShell 模块
 

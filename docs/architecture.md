@@ -113,30 +113,76 @@ fork 安全由 shell 侧契约保证：
 
 ### 4. FFI API 设计
 
-```c
-// 生命周期
-zo_session_t *zo_session_create(void); // 数据目录由 _ZO_DATA_DIR 决定
-void          zo_session_destroy(zo_session_t *session);
+**错误即返回值**：所有可能失败的导出函数直接返回错误信息字符串，
+`NULL` 表示成功；非 NULL 指针是 Rust 分配的 UTF-8 消息，调用方必须用
+`zo_free` 释放。没有任何错误槽、没有全局状态。
 
-// 数据库操作，返回 0 / <0
-int zo_session_add(zo_session_t *, const char *path, double score);
-int zo_session_query(zo_session_t *, const zo_query_options_t *, char **out);
-int zo_session_remove(zo_session_t *, const char *path);
+```c
+// 生命周期：handle 是载荷，所以走 out 参数，返回值是错误
+char *zo_session_create(zo_session_t **session);   // NULL = 成功
+char *zo_session_destroy(zo_session_t *session);   // NULL = 成功；错误仅供诊断
+
+// 数据库操作：NULL = 成功，否则返回错误消息（须 zo_free）
+char *zo_session_add(zo_session_t *, const char *path, double score);
+char *zo_session_remove(zo_session_t *, const char *path);
+char *zo_session_query(zo_session_t *, const zo_query_options_t *, char **out);
 
 // 元数据 / 统计
-const char *zo_version(void);
-void        zo_last_error(char **out);
-int         zo_session_stats(zo_session_t *, zo_stats_t *out);
-void        zo_free(char *ptr);
+char       *zo_session_stats(zo_session_t *, zo_stats_t *out);
+const char *zo_version(void);                      // 静态字符串，不可释放
+void        zo_free(char *ptr);                    // 释放结果与错误消息
 ```
 
-内存约定：`zo_session_query` 和 `zo_last_error` 返回 Rust 分配的内存，调用者
-必须 `zo_free`；`zo_version` 返回静态字符串，不可释放。`zo_session_query`
-失败时会把 `*out` 置为 NULL，调用者不能复用上一次的 out 指针。
+内存约定：`zo_session_query` 成功时把结果写入 `*out`，失败时把 `*out` 置
+为 NULL（调用方不能复用上一次的 out 指针），两种情况都通过返回值报告是否
+出错。`zo_version` 返回静态字符串，不可释放。出错返回的消息同样由 Rust
+分配，必须 `zo_free`；`zo_session_destroy` 的错误只在析构 panic 时出现，
+无法补救但便于 debug，调用方打印/释放后照常收尾。
 
-错误记录使用全局 `Mutex<Option<CString>>`，不使用 `thread_local!`，避免 TLS
-析构器在宿主线程退出时指向已 dlclose 的 DSO（macOS/Windows 无 glibc 的卸载
-保护）。
+### 4.1 为什么是返回值而不是错误槽
+
+早期版本把错误写进 `Mutex<Option<CString>>`：先是单个进程级全局槽，后来
+改成"每个 session 一个槽 + 全局兜底"。两者都需要说明清除/覆盖语义，而且
+"调用方读到的错误属于哪一次调用"依赖调用与读取之间没有别的调用插进来。
+改为返回值后这些概念全部消失：
+
+- **无共享状态**：错误直接从失败的调用返回给它的调用方。两个 session、
+  两个线程并发失败时，各自拿到的就是自己的消息，不存在互相覆盖的可能，
+  也不需要加锁（`SessionHandle` 里也不再需要 `Mutex`）。
+- **无生命周期陷阱**：没有 `thread_local!`（其 TLS 析构器在宿主线程退出
+  时会指向已被 `dlclose()` 卸载的 DSO——glibc 会跳过，macOS/Windows 不会，
+  可能 SIGSEGV），因为根本不需要长期存在的错误存储。
+- **无陈旧状态**：成功就是 NULL，失败就是消息，不存在"上一次的错误还留
+  在槽里"的问题。
+
+**空消息 ≠ 成功**：zoxide 用 `SilentExit`（fzf Ctrl-C）表示"失败但无话可
+说"，此时返回的是指向空字符串的非 NULL 指针。调用方必须先判断指针，再判
+断内容：
+
+```c
+char *err = zo_session_query(session, &opts, &out);
+if (err) {
+    if (*err)                      /* 空消息：静默失败，不打印 */
+        fprintf(stderr, "zoxide: %s\n", err);
+    zo_free(err);
+    return 1;
+}
+/* 成功：out 是结果字符串，用完 zo_free(out) */
+```
+
+被 `catch_unwind` 捕获的 panic 也走同一条通道：panic 消息被格式化成错误
+字符串返回，不会跨 FFI 边界展开（`zo_session_destroy` 的析构 panic 也由
+`ffi_guard_error!` 捕获并作为诊断信息返回）。
+
+### 4.2 各调用方如何取错误
+
+| 调用方 | 代码 | 说明 |
+| ------ | ---- | ---- |
+| zsh `module.c` | `char *err = zo_session_add(...); if (err) { zwarnnam(...); zo_free(err); }` | 由 `report_ffi_error()` / `report_query_error()` 统一打印并释放 |
+| zsh `boot_` | `char *err = zo_session_create(&g_session);` | 创建失败时 `g_session` 保持 NULL，builtin 拒绝运行 |
+| zsh `cleanup_` | `char *err = zo_session_destroy(g_session);` | 析构失败只在 panic 时出现，打印后释放即可 |
+| pwsh `Session.cs` | `IntPtr error = NativeMethods.SessionAdd(...);` → `TakeError(error)` | Add/Remove/Stats 抛异常，Query 写入 `QueryResult.Error`，Dispose 释放析构诊断 |
+| C 系统测试 | `err = session_add(session, NULL, 1.0); CHECK(err != NULL)` | 见 `tests/ffi_smoke.c` |
 
 ### 5. Shell 集成契约
 

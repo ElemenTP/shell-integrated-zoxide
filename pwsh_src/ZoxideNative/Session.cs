@@ -18,7 +18,7 @@ public sealed class QueryResult
         Error = error;
     }
 
-    /// <summary>True when zo_session_query returned 0.</summary>
+    /// <summary>True when zo_session_query succeeded (returned no error).</summary>
     public bool Success { get; }
 
     /// <summary>Query output; empty when <see cref="Success"/> is false.</summary>
@@ -35,6 +35,11 @@ public sealed class QueryResult
 /// Query / Remove call opens and closes the zoxide database, matching the
 /// original binary's cross-process behavior. All calls are single-threaded;
 /// no fork guard or thread-pool shutdown is needed.
+///
+/// Error model: every native call returns its error message (NULL on
+/// success) and the wrapper converts it into an exception (Add / Remove /
+/// GetStatsReport) or into <see cref="QueryResult.Error"/> (Query). Nothing is
+/// stored natively, so two sessions can never see each other's error.
 /// </summary>
 public sealed class Session : IDisposable
 {
@@ -46,12 +51,13 @@ public sealed class Session : IDisposable
     /// </summary>
     public Session()
     {
-        _handle = NativeMethods.SessionCreate();
-        if (_handle == IntPtr.Zero)
+        // The handle is the payload, so it comes back through the out
+        // parameter and the return value is the error (NULL on success).
+        IntPtr error = NativeMethods.SessionCreate(out _handle);
+        if (error != IntPtr.Zero)
         {
-            string? err = LastError();
             throw new InvalidOperationException(
-                $"Failed to create zoxide session: {err ?? "unknown error"}");
+                $"Failed to create zoxide session: {TakeError(error)}");
         }
     }
 
@@ -61,12 +67,12 @@ public sealed class Session : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(path);
 
-        int rc = NativeMethods.SessionAdd(_handle, path, score);
-        if (rc != 0)
+        // Every call returns its own error message; nothing is stored.
+        IntPtr error = NativeMethods.SessionAdd(_handle, path, score);
+        if (error != IntPtr.Zero)
         {
-            string? err = LastError();
             throw new InvalidOperationException(
-                $"zoxide add failed (rc={rc}): {err ?? "unknown error"}");
+                $"zoxide add failed: {TakeError(error)}");
         }
     }
 
@@ -76,12 +82,11 @@ public sealed class Session : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(path);
 
-        int rc = NativeMethods.SessionRemove(_handle, path);
-        if (rc != 0)
+        IntPtr error = NativeMethods.SessionRemove(_handle, path);
+        if (error != IntPtr.Zero)
         {
-            string? err = LastError();
             throw new InvalidOperationException(
-                $"zoxide remove failed (rc={rc}): {err ?? "unknown error"}");
+                $"zoxide remove failed: {TakeError(error)}");
         }
     }
 
@@ -119,10 +124,12 @@ public sealed class Session : IDisposable
             try
             {
                 Marshal.StructureToPtr(input.Options, optionsPtr, false);
-                int rc = NativeMethods.SessionQuery(_handle, optionsPtr, out IntPtr output);
-                if (rc != 0)
+                IntPtr error = NativeMethods.SessionQuery(_handle, optionsPtr, out IntPtr output);
+                if (error != IntPtr.Zero)
                 {
-                    return new QueryResult(false, null, LastError());
+                    // The failing call hands back its own message; an empty
+                    // message means a silent exit (fzf Ctrl-C).
+                    return new QueryResult(false, null, TakeError(error));
                 }
                 if (output == IntPtr.Zero)
                 {
@@ -157,15 +164,18 @@ public sealed class Session : IDisposable
         return Marshal.PtrToStringUTF8(ptr) ?? "unknown";
     }
 
-    /// <summary>Get the last native error, or null if none.</summary>
-    public static string? LastError()
+    /// <summary>
+    /// Consume an error pointer returned by a native call: NULL means success
+    /// (returns null), otherwise the message is copied into a managed string
+    /// and the native allocation is released with zo_free.
+    /// </summary>
+    private static string? TakeError(IntPtr error)
     {
-        NativeMethods.LastError(out IntPtr ptr);
-        if (ptr == IntPtr.Zero)
+        if (error == IntPtr.Zero)
             return null;
-        string? ret = Marshal.PtrToStringUTF8(ptr);
-        NativeMethods.Free(ptr);
-        return ret;
+        string? message = Marshal.PtrToStringUTF8(error);
+        NativeMethods.Free(error);
+        return message;
     }
 
     /// <summary>Get a human-readable session statistics report.</summary>
@@ -173,12 +183,11 @@ public sealed class Session : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        int rc = NativeMethods.SessionStats(_handle, out var stats);
-        if (rc != 0)
+        IntPtr error = NativeMethods.SessionStats(_handle, out var stats);
+        if (error != IntPtr.Zero)
         {
-            string? err = LastError();
             throw new InvalidOperationException(
-                $"zoxide stats failed: {err ?? "unknown error"}");
+                $"zoxide stats failed: {TakeError(error)}");
         }
 
         return $"Adds: {stats.Adds}, Queries: {stats.Queries}, " +
@@ -189,7 +198,11 @@ public sealed class Session : IDisposable
     {
         if (!_disposed && _handle != IntPtr.Zero)
         {
-            NativeMethods.SessionDestroy(_handle);
+            // Teardown reports an error only if the native destructor panicked.
+            // Diagnostics cannot be surfaced from Dispose without throwing, so
+            // the message is released here.
+            IntPtr error = NativeMethods.SessionDestroy(_handle);
+            NativeMethods.Free(error);
             _handle = IntPtr.Zero;
         }
         _disposed = true;

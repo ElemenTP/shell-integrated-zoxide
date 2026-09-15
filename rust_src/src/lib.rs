@@ -17,12 +17,37 @@
 //! # Safety
 //!
 //! All FFI functions use `catch_unwind` wrappers to prevent Rust panics from
-//! unwinding across the FFI boundary. Errors are reported via return codes and
-//! a global mutex guarded error string accessible via `zo_last_error()`.
+//! unwinding across the FFI boundary. Errors are reported as **return
+//! values**, not as stored state:
+//!
+//! ```c
+//! char *err = zo_session_add(session, path, 1.0);
+//! if (err) {
+//!     fprintf(stderr, "zoxide: %s\n", err);
+//!     zo_free(err);            /* caller owns the message */
+//! }
+//! ```
+//!
+//! NULL means success; a non-NULL pointer is a Rust-allocated message that
+//! must be freed with `zo_free()`. An empty message is still a failure (zoxide
+//! reports fzf Ctrl-C that way) — callers test the pointer first and print
+//! only when the text is non-empty.
+//!
+//! Because nothing is stored, there is no shared error state: concurrent
+//! sessions can never clobber each other's message, and there is no
+//! `thread_local!` (whose TLS destructor would dangle after the shell
+//! `dlclose()`s this cdylib — glibc skips destructors of unloaded DSOs, macOS
+//! and Windows do not).
+//!
+//! `zo_session_create` writes the handle to an out-parameter and returns the
+//! error instead (the handle is the payload). `zo_session_destroy` returns an
+//! error string too, so a failure while tearing the session down is visible for
+//! debugging. `zo_free` cannot fail and returns void.
 
-// The exported `zo_*` functions are the unsafe boundary of this crate. They
-// validate every raw pointer before dereferencing, so they are intentionally
-// callable from C without an `unsafe` block in Rust.
+// The exported `zo_*` functions are the unsafe boundary of this crate: each one
+// documents its pointer contract in a `# Safety` section. Callers from C are
+// unaffected by the Rust `unsafe` marker; Rust callers (the unit tests) wrap the
+// calls in `unsafe` blocks.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod ffi;

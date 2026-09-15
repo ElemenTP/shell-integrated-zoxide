@@ -3,7 +3,12 @@
  *
  * Builds against zsh_src/ffi.h and loads the compiled cdylib with the platform
  * dynamic loader. This verifies the real exported ABI (names, struct layout,
- * memory ownership) without going through zsh or pwsh.
+ * memory ownership, error-return convention) without going through zsh or
+ * pwsh.
+ *
+ * Error convention under test: every call that can fail returns the error
+ * message itself — NULL means success, a non-NULL pointer is a Rust-allocated
+ * string the caller frees with zo_free().
  */
 
 #include "../zsh_src/ffi.h"
@@ -50,15 +55,14 @@ int main(int argc, char **argv) {
   char version_buf[64] = {0};
   int rc = EXIT_FAILURE;
 
-  typedef zo_session_t *(*session_create_fn)(void);
-  typedef void (*session_destroy_fn)(zo_session_t *);
-  typedef int (*session_add_fn)(zo_session_t *, const char *, double);
-  typedef int (*session_query_fn)(zo_session_t *, const zo_query_options_t *,
-                                  char **);
-  typedef int (*session_stats_fn)(zo_session_t *, zo_stats_t *);
+  typedef char *(*session_create_fn)(zo_session_t **);
+  typedef char *(*session_destroy_fn)(zo_session_t *);
+  typedef char *(*session_add_fn)(zo_session_t *, const char *, double);
+  typedef char *(*session_query_fn)(zo_session_t *, const zo_query_options_t *,
+                                    char **);
+  typedef char *(*session_stats_fn)(zo_session_t *, zo_stats_t *);
   typedef void (*free_fn)(char *);
   typedef const char *(*version_fn)(void);
-  typedef void (*last_error_fn)(char **);
   session_create_fn session_create = NULL;
   session_destroy_fn session_destroy = NULL;
   session_add_fn session_add = NULL;
@@ -66,7 +70,6 @@ int main(int argc, char **argv) {
   session_stats_fn session_stats = NULL;
   free_fn zo_free = NULL;
   version_fn zo_version = NULL;
-  last_error_fn zo_last_error = NULL;
 
 #ifdef _WIN32
   char data_template[] = "zoxide_ffi_smoke_XXXXXX";
@@ -96,25 +99,38 @@ int main(int argc, char **argv) {
   session_stats = (session_stats_fn)DL_SYM(lib, "zo_session_stats");
   zo_free = (free_fn)DL_SYM(lib, "zo_free");
   zo_version = (version_fn)DL_SYM(lib, "zo_version");
-  zo_last_error = (last_error_fn)DL_SYM(lib, "zo_last_error");
   CHECK(session_create && session_destroy && session_add && session_query &&
-        session_stats && zo_free && zo_version && zo_last_error);
+        session_stats && zo_free && zo_version);
 
   const char *version = zo_version();
   CHECK(version != NULL && version[0] != '\0');
   snprintf(version_buf, sizeof(version_buf), "%s", version);
-
-  zo_last_error(&err);
-  CHECK(err == NULL);
 
 #ifdef _WIN32
   CHECK(_putenv_s("_ZO_DATA_DIR", data_dir) == 0);
 #else
   CHECK(setenv("_ZO_DATA_DIR", data_dir, 1) == 0);
 #endif
-  session = session_create();
+
+  /* The handle is the payload, so it comes back through the out-parameter
+   * and the return value is the error. */
+  err = session_create(&session);
+  CHECK(err == NULL);
   CHECK(session != NULL);
-  CHECK(session_add(session, target, 1.0) == 0);
+
+  /* A failing call returns its own message; NULL would mean success. */
+  err = session_add(session, NULL, 1.0);
+  CHECK(err != NULL && *err != '\0');
+  zo_free(err);
+  err = NULL;
+
+  /* Same for a call with no session at all. */
+  err = session_add(NULL, target, 1.0);
+  CHECK(err != NULL && *err != '\0');
+  zo_free(err);
+  err = NULL;
+
+  CHECK(session_add(session, target, 1.0) == NULL);
 
   const char *keyword = strrchr(target, '/');
   keyword = keyword ? keyword + 1 : target;
@@ -124,18 +140,34 @@ int main(int argc, char **argv) {
   options.keywords = keywords;
   options.keywords_len = 1;
 
-  CHECK(session_query(session, &options, &out) == 0);
+  CHECK(session_query(session, &options, &out) == NULL);
   CHECK(out != NULL && strstr(out, target) != NULL);
   zo_free(out);
   out = NULL;
 
+  /* A failing query reports its error and clears the caller's output slot. */
+  zo_query_options_t conflicting = options;
+  conflicting.interactive = 1;
+  conflicting.list = 1;
+  err = session_query(session, &conflicting, &out);
+  CHECK(err != NULL && *err != '\0');
+  CHECK(out == NULL);
+  zo_free(err);
+  err = NULL;
+
   zo_stats_t stats;
   memset(&stats, 0, sizeof(stats));
-  CHECK(session_stats(session, &stats) == 0);
+  CHECK(session_stats(session, &stats) == NULL);
   CHECK(stats.adds == 1 && stats.queries == 1 && stats.entries == 1);
 
-  session_destroy(session);
-  session = NULL;
+  /* Teardown reports errors as well (a panic in the destructor is the only
+   * cause), so the message is checked and released like any other. */
+  err = session_destroy(session);
+  session = NULL; /* set before CHECK so the fail path cannot double-destroy */
+  CHECK(err == NULL);
+  zo_free(err);
+  err = NULL;
+
   DL_CLOSE(lib);
   lib = NULL;
 
@@ -147,8 +179,11 @@ fail:
     zo_free(out);
   if (err && zo_free)
     zo_free(err);
-  if (session && session_destroy)
-    session_destroy(session);
+  if (session && session_destroy && zo_free) {
+    char *destroy_err = session_destroy(session);
+    if (destroy_err)
+      zo_free(destroy_err);
+  }
   if (lib)
     DL_CLOSE(lib);
   if (target) {
