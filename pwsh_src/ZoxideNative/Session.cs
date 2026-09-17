@@ -18,7 +18,7 @@ public sealed class QueryResult
         Error = error;
     }
 
-    /// <summary>True when zo_session_query succeeded (returned no error).</summary>
+    /// <summary>True when zo_query succeeded (returned no error).</summary>
     public bool Success { get; }
 
     /// <summary>Query output; empty when <see cref="Success"/> is false.</summary>
@@ -29,46 +29,60 @@ public sealed class QueryResult
 }
 
 /// <summary>
-/// Safe managed wrapper around the zoxide-ffi native session.
+/// Managed wrapper around the single process-global zoxide-ffi session.
 ///
-/// The native session handle only tracks per-session counters. Each Add /
-/// Query / Remove call opens and closes the zoxide database, matching the
-/// original binary's cross-process behavior. All calls are single-threaded;
-/// no fork guard or thread-pool shutdown is needed.
+/// zoxide is a CLI whose state is meant to die with the process, and one pwsh
+/// process loads this module once, so the native side keeps exactly one
+/// session instead of handing out handles. <see cref="Initialize"/> creates it
+/// (idempotent), <see cref="Shutdown"/> drops it and resets its counters, and
+/// the data operations work on the global session directly.
 ///
-/// Error model: every native call returns its error message (NULL on
-/// success) and the wrapper converts it into an exception (Add / Remove /
-/// GetStatsReport) or into <see cref="QueryResult.Error"/> (Query). Nothing is
-/// stored natively, so two sessions can never see each other's error.
+/// Each Add / Query / Remove call opens and closes the zoxide database,
+/// matching the original binary's cross-process behavior. All calls are
+/// single-threaded; no fork guard or thread-pool shutdown is needed.
+///
+/// Error model: every native call returns its error message (NULL on success)
+/// and the wrapper converts it into an exception (Add / Remove /
+/// GetStatsReport) or into <see cref="QueryResult.Error"/> (Query). Errors are
+/// local to the call, so there is no stored error state.
 /// </summary>
-public sealed class Session : IDisposable
+public static class Session
 {
-    private IntPtr _handle;
-    private bool _disposed;
-
     /// <summary>
-    /// Create a session.
+    /// Initialize the process-global native session. Idempotent; safe to call
+    /// again when the module is re-imported.
     /// </summary>
-    public Session()
+    public static void Initialize()
     {
-        // The handle is the payload, so it comes back through the out
-        // parameter and the return value is the error (NULL on success).
-        IntPtr error = NativeMethods.SessionCreate(out _handle);
+        IntPtr error = NativeMethods.Init();
         if (error != IntPtr.Zero)
         {
             throw new InvalidOperationException(
-                $"Failed to create zoxide session: {TakeError(error)}");
+                $"Failed to initialize zoxide session: {TakeError(error)}");
+        }
+    }
+
+    /// <summary>
+    /// Drop the process-global native session and reset its counters. The
+    /// on-disk database is untouched.
+    /// </summary>
+    public static void Shutdown()
+    {
+        IntPtr error = NativeMethods.Shutdown();
+        if (error != IntPtr.Zero)
+        {
+            throw new InvalidOperationException(
+                $"Failed to shutdown zoxide session: {TakeError(error)}");
         }
     }
 
     /// <summary>Add a directory to the database.</summary>
-    public void Add(string path, double score = 1.0)
+    public static void Add(string path, double score = 1.0)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(path);
 
         // Every call returns its own error message; nothing is stored.
-        IntPtr error = NativeMethods.SessionAdd(_handle, path, score);
+        IntPtr error = NativeMethods.Add(path, score);
         if (error != IntPtr.Zero)
         {
             throw new InvalidOperationException(
@@ -77,12 +91,11 @@ public sealed class Session : IDisposable
     }
 
     /// <summary>Remove a directory from the database.</summary>
-    public void Remove(string path)
+    public static void Remove(string path)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrEmpty(path);
 
-        IntPtr error = NativeMethods.SessionRemove(_handle, path);
+        IntPtr error = NativeMethods.Remove(path);
         if (error != IntPtr.Zero)
         {
             throw new InvalidOperationException(
@@ -105,7 +118,7 @@ public sealed class Session : IDisposable
     /// <c>Output</c> is empty and <c>Error</c> contains the native error
     /// message (empty for silent exits such as fzf Ctrl-C).
     /// </returns>
-    public QueryResult Query(
+    public static QueryResult Query(
         IReadOnlyList<string>? keywords = null,
         string? exclude = null,
         string? baseDir = null,
@@ -114,8 +127,6 @@ public sealed class Session : IDisposable
         bool list = false,
         bool score = false)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
         using var input = BuildInput(keywords, exclude, baseDir, all,
                                       interactive, list, score);
         try
@@ -124,7 +135,7 @@ public sealed class Session : IDisposable
             try
             {
                 Marshal.StructureToPtr(input.Options, optionsPtr, false);
-                IntPtr error = NativeMethods.SessionQuery(_handle, optionsPtr, out IntPtr output);
+                IntPtr error = NativeMethods.Query(optionsPtr, out IntPtr output);
                 if (error != IntPtr.Zero)
                 {
                     // The failing call hands back its own message; an empty
@@ -179,11 +190,9 @@ public sealed class Session : IDisposable
     }
 
     /// <summary>Get a human-readable session statistics report.</summary>
-    public string GetStatsReport()
+    public static string GetStatsReport()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        IntPtr error = NativeMethods.SessionStats(_handle, out var stats);
+        IntPtr error = NativeMethods.Stats(out var stats);
         if (error != IntPtr.Zero)
         {
             throw new InvalidOperationException(
@@ -192,20 +201,6 @@ public sealed class Session : IDisposable
 
         return $"Adds: {stats.Adds}, Queries: {stats.Queries}, " +
                $"Removes: {stats.Removes}, Entries: {stats.Entries}";
-    }
-
-    public void Dispose()
-    {
-        if (!_disposed && _handle != IntPtr.Zero)
-        {
-            // Teardown reports an error only if the native destructor panicked.
-            // Diagnostics cannot be surfaced from Dispose without throwing, so
-            // the message is released here.
-            IntPtr error = NativeMethods.SessionDestroy(_handle);
-            NativeMethods.Free(error);
-            _handle = IntPtr.Zero;
-        }
-        _disposed = true;
     }
 
     // ------------------------------------------------------------------

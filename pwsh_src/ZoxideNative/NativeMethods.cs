@@ -18,14 +18,18 @@ namespace ZoxideNative;
 ///
 /// Error reporting model: every native call that can fail returns its error
 /// message directly — NULL means success, otherwise the pointer is a
-/// Rust-allocated UTF-8 message to free with zo_free. Nothing is stored on
-/// the session or in a global, so concurrent sessions can never clobber each
-/// other's error. An empty message is still a failure (zoxide reports
-/// fzf Ctrl-C that way), so callers test the pointer, never the text.
+/// Rust-allocated UTF-8 message to free with zo_free. Errors stay local to the
+/// call, so there is no error slot to inspect or clear. An empty message is
+/// still a failure (zoxide reports fzf Ctrl-C that way), so callers test the
+/// pointer, never the text.
 ///
-/// Strings returned by zo_session_query (results) and by any failing call
-/// (error messages) must be freed with zo_free. zo_version strings are static
-/// and must NOT be freed.
+/// The native library owns exactly one process-global session: <see cref="Init"/>
+/// creates it and <see cref="Shutdown"/> drops it. The database operations take
+/// no session handle.
+///
+/// Strings returned by zo_query (results) and by any failing call (error
+/// messages) must be freed with zo_free. zo_version strings are static and must
+/// NOT be freed.
 /// </summary>
 internal static unsafe partial class NativeMethods
 {
@@ -60,21 +64,18 @@ internal static unsafe partial class NativeMethods
     // ── Session lifecycle ──────────────────────────────────────────────
 
     /// <summary>
-    /// Create a session. Returns NULL on success and writes the handle to
-    /// <paramref name="session"/>; on failure returns an error message that
-    /// must be freed with <see cref="Free"/> and leaves the handle NULL.
+    /// Initialize the process-global session. Idempotent. Returns NULL on
+    /// success, otherwise an error message to free with <see cref="Free"/>.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_create")]
-    internal static partial IntPtr SessionCreate(out IntPtr session);
+    [LibraryImport(LibName, EntryPoint = "zo_init")]
+    internal static partial IntPtr Init();
 
     /// <summary>
-    /// Destroy a session. Returns NULL on success, otherwise an error message
-    /// to free with <see cref="Free"/> (diagnostic only: a panic while dropping
-    /// the session is the only way teardown can fail). NULL is a successful
-    /// no-op.
+    /// Drop the process-global session, resetting its counters. The on-disk
+    /// database is untouched.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_destroy")]
-    internal static partial IntPtr SessionDestroy(IntPtr session);
+    [LibraryImport(LibName, EntryPoint = "zo_shutdown")]
+    internal static partial IntPtr Shutdown();
 
     // ── Database operations ─────────────────────────────────────────────
 
@@ -82,23 +83,23 @@ internal static unsafe partial class NativeMethods
     /// Add a directory to the database. Returns NULL on success, otherwise an
     /// error message to free with <see cref="Free"/>.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_add", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial IntPtr SessionAdd(IntPtr session, string path, double score);
+    [LibraryImport(LibName, EntryPoint = "zo_add", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr Add(string path, double score);
 
     /// <summary>
     /// Remove a directory from the database. Returns NULL on success,
     /// otherwise an error message to free with <see cref="Free"/>.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_remove", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial IntPtr SessionRemove(IntPtr session, string path);
+    [LibraryImport(LibName, EntryPoint = "zo_remove", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr Remove(string path);
 
     /// <summary>
     /// Run a query. Returns NULL on success and writes a Rust-allocated UTF-8
     /// result to <paramref name="output"/> (free it with <see cref="Free"/>);
     /// on failure returns an error message and sets the output to NULL.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_query")]
-    internal static partial IntPtr SessionQuery(IntPtr session, IntPtr options, out IntPtr output);
+    [LibraryImport(LibName, EntryPoint = "zo_query")]
+    internal static partial IntPtr Query(IntPtr options, out IntPtr output);
 
     // ── Statistics and metadata ──────────────────────────────────────────
 
@@ -106,8 +107,8 @@ internal static unsafe partial class NativeMethods
     /// Retrieve session counters. Returns NULL on success, else an error
     /// message to free with <see cref="Free"/>.
     /// </summary>
-    [LibraryImport(LibName, EntryPoint = "zo_session_stats")]
-    internal static partial IntPtr SessionStats(IntPtr session, out ZoStats stats);
+    [LibraryImport(LibName, EntryPoint = "zo_stats")]
+    internal static partial IntPtr Stats(out ZoStats stats);
 
     /// <summary>
     /// Free a string returned by any native call — a query result or an error
@@ -124,8 +125,8 @@ internal static unsafe partial class NativeMethods
 }
 
 /// <summary>
-/// C-compatible input struct for zo_session_query. Must exactly match the
-/// Rust <c>zo_query_options</c> layout.
+/// C-compatible input struct for zo_query. Must exactly match the Rust
+/// <c>zo_query_options</c> layout.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct ZoQueryOptions
@@ -140,7 +141,7 @@ internal struct ZoQueryOptions
     public int Score;             // int
 }
 
-/// <summary>C-compatible stats struct for zo_session_stats.</summary>
+/// <summary>C-compatible stats struct for zo_stats.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct ZoStats
 {

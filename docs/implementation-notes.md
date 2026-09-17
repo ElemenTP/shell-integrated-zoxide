@@ -80,7 +80,7 @@ Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
 
   ```c
   // C / zsh module.c：错误由这次调用自己返回
-  char *err = zo_session_add(g_session, path, 1.0);
+  char *err = zo_add(path, 1.0);
   if (err) {
       zwarnnam(MODNAME, "%s: %s", op, err);
       zo_free(err);
@@ -89,17 +89,23 @@ Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
 
   ```csharp
   // pwsh Session.cs（托管侧）
-  IntPtr error = NativeMethods.SessionAdd(_handle, path, score);
+  IntPtr error = NativeMethods.Add(path, score);
   if (error != IntPtr.Zero) {
       throw new InvalidOperationException($"zoxide add failed: {TakeError(error)}");
   }
   ```
 
-- 由此得到的性质：**没有共享错误状态**，不同 session / 不同线程并发失败
-  时各自拿到自己的消息（不需要锁，`SessionHandle` 里的 `Mutex` 也删掉了）；
-  不存在"上一次的错误还留在槽里"；也不存在 `thread_local!` 的 TLS
-  destructor 在 `dlclose()` 之后被宿主线程调用的问题（macOS/Windows 没有
-  glibc 的卸载保护），因为压根没有长期存在的错误存储。
+- 由此得到的性质：**错误没有共享状态**，同一个全局 session 上不同线程并发
+  失败时各自拿到自己的消息；不存在"上一次的错误还留在槽里"；也不存在
+  `thread_local!` 的 TLS destructor 在 `dlclose()` 之后被宿主线程调用的
+  问题（macOS/Windows 没有 glibc 的卸载保护），因为压根没有长期存在的错误
+  存储。
+- `zo_init()` 建立**进程全局唯一**的 session，幂等；数据操作不带 handle，
+  未初始化时返回 `<op>: session is not initialized`。
+- `zo_shutdown()` 丢弃全局 session、清零计数器，磁盘 `db.zo` 不受影响；
+  未初始化时是无操作。`zo_free`不可能失败，因此返回void。
+- `zo_query` 成功时 `*out` 是结果字符串、失败时 `*out` 被置 NULL
+  （两种情况都要 `zo_free`：结果是结果，错误消息本身也是分配出来的）。
 - **空消息 ≠ 成功**：`SilentExit`（fzf Ctrl-C）返回指向空字符串的非 NULL
   指针，调用方先判断指针、再判断内容：
 
@@ -111,21 +117,18 @@ Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
   }
   ```
 
-- `zo_session_create` 的载荷是 handle，因此签名是
-  `char *zo_session_create(zo_session_t **out)`：成功返回 NULL 并写入
-  handle，失败返回错误消息并把 `*out` 置 NULL。
-- `zo_session_destroy` 同样返回错误字符串：销毁本身不可失败，只有析构
-  panic 会走到错误分支，返回值纯粹是诊断信息（zsh `cleanup_` 打印后释放，
-  pwsh `Dispose` 释放，C 系统测试断言为 NULL），便于定位此类 bug。
-  `zo_free` 才是唯一没有错误返回的导出（释放不可能失败）。
-- `zo_session_query` 成功时 `*out` 是结果字符串、失败时 `*out` 被置 NULL
-  （两种情况都要 `zo_free`：结果是结果，错误消息本身也是分配出来的）。
+- `zo_free` 是唯一没有错误返回的纯释放函数；
 
 ### 2.4 为什么没有 fork guard
 
 zoxide 没有 tokio/rayon，没有全局线程池，`Database` 只是普通内存结构。
 zsh 插件通过零参数 builtin 写参数，不在 `$(...)` 中调用 FFI。单线程 + 无
 fork 调用 = 不需要 PID 检查。
+
+全局 session 用 `Mutex<Option<Session>>` 保存。锁只在单次 FFI 调用期间持有，
+shell 是单线程调用方，因此正常路径没有竞争；锁的作用是让"进程全局唯一"
+这一设计在多线程宿主下依然内存安全。参数校验（NULL、非 UTF-8、非法
+keywords 数组等）在加锁前完成，非法调用不触碰全局 session。
 
 ## 3. zsh 模块
 
@@ -211,30 +214,37 @@ freearray(copy);
 
 ### 3.4 卸载安全
 
-`cleanup_` 做 `zo_session_destroy`（返回的析构诊断信息打印后 `zo_free`）+
-`setfeatureenables(..., NULL)`。没有线程池需要 shutdown。
-`tests/test_unload_zoxide_zsh.sh` 连续三轮 `zmodload -u` / `zmodload` 验证
-会话能重新创建。
+`boot_` 调用幂等的 `zo_init()`，`cleanup_` 调用 `zo_shutdown()` 重置全局
+session，再 `setfeatureenables(..., NULL)`。C shim 不保存任何 handle，也没有
+线程池需要 shutdown。`tests/test_unload_zoxide_zsh.sh` 连续三轮
+`zmodload -u` / `zmodload`，并检查每轮 `ZOXIDE_STATS_ADDS` 都从 0 重新开始，
+验证会话计数器确实在卸载时清零。
 
 ## 4. PowerShell 模块
 
 ### 4.1 LibraryImport 的 string marshalling
 
-`SessionCreate` / `SessionAdd` / `SessionRemove` 直接声明 `string?` 参数，
-`[LibraryImport(..., StringMarshalling = StringMarshalling.Utf8)]` 会把空引用
-封送为 NULL，不需要手工分配字符串。查询的 keyword 数组仍需要手工分配
-`char *[]`，由 `NativeInput` 统一持有并在 finally 中释放。
+`NativeMethods.Add` / `NativeMethods.Remove` / `NativeMethods.Init` 等直接
+声明 `string?` / 无 handle 参数，`[LibraryImport(...,
+StringMarshalling = StringMarshalling.Utf8)]` 会把空引用封送为 NULL，不需要
+手工分配字符串。查询的 keyword 数组仍需要手工分配 `char *[]`，由
+`NativeInput` 统一持有并在 finally 中释放。
+
+模块导入时 psm1 先同步 `_ZO_DATA_DIR`，再调用
+`[ZoxideNative.Session]::Initialize()`（内部 `zo_init`）；OnRemove 调用
+`[ZoxideNative.Session]::Shutdown()`（内部 `zo_shutdown`）。因此 pwsh 侧不再
+需要 `Get-Session` 懒加载或 `IDisposable`。
 
 ### 4.2 PowerShell 不能 splat 调用 .NET 方法
 
 PowerShell 的 splatting 只适用于 cmdlet / 函数调用，不适用于 .NET 方法。
-psm1 中通过 `Invoke-ZoxideQuery` 函数用位置参数调用 C# `Session.Query`，
-调用侧仍可用命名参数。
+psm1 中通过 `Invoke-ZoxideQuery` 函数用位置参数调用静态
+`[ZoxideNative.Session]::Query(...)`，调用侧仍可用命名参数。
 
 ### 4.3 查询失败不能抛异常
 
-最初 `Session.Query` 在 `rc != 0` 时抛 `InvalidOperationException`，导致
-`zi` 无匹配或 fzf Ctrl-C 时 PowerShell 打印一大段异常。原版二进制行为是：
+最初 `Query` 在查询失败时抛 `InvalidOperationException`，导致 `zi` 无匹配
+或 fzf Ctrl-C 时 PowerShell 打印一大段异常。原版二进制行为是：
 
 - no match：stderr 输出错误信息，退出码 1
 - fzf Ctrl-C：静默退出
@@ -259,7 +269,8 @@ return
 
 Linux/macOS 上 `$env:_ZO_MAXAGE = 100` 只更新 .NET 环境块，Rust 的
 `std::env::var` 通过 `getenv()` 读取不到。`ZoxideEnvironment` 同时调用
-libc `setenv` / `unsetenv`。`_ZO_DATA_DIR` 在创建 session 前同步到原生环境。
+libc `setenv` / `unsetenv`。`_ZO_DATA_DIR` 在 `Initialize()` 之前同步到
+原生环境。
 
 `PATH` 同样受此限制：`zi` 的 Rust 侧通过 `Command::new("fzf")` 读取原生
 `getenv("PATH")`。约定 pwsh profile 在导入本模块前完成 PATH 设置，并把本
@@ -320,9 +331,9 @@ strip 在 macOS 使用 `-u`（只移除调试符号，保留导出符号），Li
 
 | 层         | 位置                                      | 说明                                   |
 | ---------- | ----------------------------------------- | -------------------------------------- |
-| 单元测试   | `rust_src/src/ffi.rs`                     | FFI null 安全、输出槽清零、roundtrip、stats、错误  |
+| 单元测试   | `rust_src/src/ffi.rs`                     | 全局 session 生命周期、未初始化错误、null 安全、输出槽清零、roundtrip、stats |
 | 单元测试   | zoxide `src/session.rs` + `db`            | 跨 session 可见性、命令复用、0600 权限；`test-upstream` 目标执行 |
-| 系统测试   | `tests/ffi_smoke.c`                       | dlopen 真实 .so，验证 ABI 与内存所有权 |
+| 系统测试   | `tests/ffi_smoke.c`                       | dlopen 真实 .so，验证 ABI、生命周期与内存所有权 |
 | 集成测试   | `tests/test_zoxide_zsh.sh`                | zmodload、变量协议、跨进程更新、非 ASCII 标量、plugin 跳转、fzf |
-| 集成测试   | `tests/test_unload_zoxide_zsh.sh`         | 失败加载可重试 + 卸载/重载循环        |
-| 集成测试   | `tests/test_pwsh.ps1`                     | 模块导入、hook、z/zi、fzf、查询失败不抛异常 |
+| 集成测试   | `tests/test_unload_zoxide_zsh.sh`         | 失败加载可重试 + 卸载/重载并校验计数器归零 |
+| 集成测试   | `tests/test_pwsh.ps1`                     | 模块导入/移除重载、hook、z/zi、fzf、查询失败不抛异常 |

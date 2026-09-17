@@ -3,8 +3,8 @@
  *
  * Builds against zsh_src/ffi.h and loads the compiled cdylib with the platform
  * dynamic loader. This verifies the real exported ABI (names, struct layout,
- * memory ownership, error-return convention) without going through zsh or
- * pwsh.
+ * memory ownership, error-return convention, global-session lifecycle) without
+ * going through zsh or pwsh.
  *
  * Error convention under test: every call that can fail returns the error
  * message itself — NULL means success, a non-NULL pointer is a Rust-allocated
@@ -47,27 +47,28 @@ int main(int argc, char **argv) {
   }
 
   DL_HANDLE lib = NULL;
-  zo_session_t *session = NULL;
   char *out = NULL;
   char *target = NULL;
   char *data_dir = NULL;
   char *err = NULL;
   char version_buf[64] = {0};
+  int initialized = 0;
   int rc = EXIT_FAILURE;
 
-  typedef char *(*session_create_fn)(zo_session_t **);
-  typedef char *(*session_destroy_fn)(zo_session_t *);
-  typedef char *(*session_add_fn)(zo_session_t *, const char *, double);
-  typedef char *(*session_query_fn)(zo_session_t *, const zo_query_options_t *,
-                                    char **);
-  typedef char *(*session_stats_fn)(zo_session_t *, zo_stats_t *);
+  typedef char *(*init_fn)(void);
+  typedef char *(*shutdown_fn)(void);
+  typedef char *(*add_fn)(const char *, double);
+  typedef char *(*remove_fn)(const char *);
+  typedef char *(*query_fn)(const zo_query_options_t *, char **);
+  typedef char *(*stats_fn)(zo_stats_t *);
   typedef void (*free_fn)(char *);
   typedef const char *(*version_fn)(void);
-  session_create_fn session_create = NULL;
-  session_destroy_fn session_destroy = NULL;
-  session_add_fn session_add = NULL;
-  session_query_fn session_query = NULL;
-  session_stats_fn session_stats = NULL;
+  init_fn zo_init = NULL;
+  shutdown_fn zo_shutdown = NULL;
+  add_fn zo_add = NULL;
+  remove_fn zo_remove = NULL;
+  query_fn zo_query = NULL;
+  stats_fn zo_stats = NULL;
   free_fn zo_free = NULL;
   version_fn zo_version = NULL;
 
@@ -92,15 +93,16 @@ int main(int argc, char **argv) {
   lib = DL_OPEN(argv[1]);
   CHECK(lib != NULL);
 
-  session_create = (session_create_fn)DL_SYM(lib, "zo_session_create");
-  session_destroy = (session_destroy_fn)DL_SYM(lib, "zo_session_destroy");
-  session_add = (session_add_fn)DL_SYM(lib, "zo_session_add");
-  session_query = (session_query_fn)DL_SYM(lib, "zo_session_query");
-  session_stats = (session_stats_fn)DL_SYM(lib, "zo_session_stats");
+  zo_init = (init_fn)DL_SYM(lib, "zo_init");
+  zo_shutdown = (shutdown_fn)DL_SYM(lib, "zo_shutdown");
+  zo_add = (add_fn)DL_SYM(lib, "zo_add");
+  zo_remove = (remove_fn)DL_SYM(lib, "zo_remove");
+  zo_query = (query_fn)DL_SYM(lib, "zo_query");
+  zo_stats = (stats_fn)DL_SYM(lib, "zo_stats");
   zo_free = (free_fn)DL_SYM(lib, "zo_free");
   zo_version = (version_fn)DL_SYM(lib, "zo_version");
-  CHECK(session_create && session_destroy && session_add && session_query &&
-        session_stats && zo_free && zo_version);
+  CHECK(zo_init && zo_shutdown && zo_add && zo_remove && zo_query && zo_stats &&
+        zo_free && zo_version);
 
   const char *version = zo_version();
   CHECK(version != NULL && version[0] != '\0');
@@ -112,25 +114,25 @@ int main(int argc, char **argv) {
   CHECK(setenv("_ZO_DATA_DIR", data_dir, 1) == 0);
 #endif
 
-  /* The handle is the payload, so it comes back through the out-parameter
-   * and the return value is the error. */
-  err = session_create(&session);
+  /* Data operations before zo_init report the missing session. */
+  err = zo_add(target, 1.0);
+  CHECK(err != NULL && *err != '\0');
+  CHECK(strstr(err, "not initialized") != NULL);
+  zo_free(err);
+  err = NULL;
+
+  /* One process-global session; initialization is a plain success/failure. */
+  err = zo_init();
   CHECK(err == NULL);
-  CHECK(session != NULL);
+  initialized = 1;
 
   /* A failing call returns its own message; NULL would mean success. */
-  err = session_add(session, NULL, 1.0);
+  err = zo_add(NULL, 1.0);
   CHECK(err != NULL && *err != '\0');
   zo_free(err);
   err = NULL;
 
-  /* Same for a call with no session at all. */
-  err = session_add(NULL, target, 1.0);
-  CHECK(err != NULL && *err != '\0');
-  zo_free(err);
-  err = NULL;
-
-  CHECK(session_add(session, target, 1.0) == NULL);
+  CHECK(zo_add(target, 1.0) == NULL);
 
   const char *keyword = strrchr(target, '/');
   keyword = keyword ? keyword + 1 : target;
@@ -140,7 +142,7 @@ int main(int argc, char **argv) {
   options.keywords = keywords;
   options.keywords_len = 1;
 
-  CHECK(session_query(session, &options, &out) == NULL);
+  CHECK(zo_query(&options, &out) == NULL);
   CHECK(out != NULL && strstr(out, target) != NULL);
   zo_free(out);
   out = NULL;
@@ -149,7 +151,7 @@ int main(int argc, char **argv) {
   zo_query_options_t conflicting = options;
   conflicting.interactive = 1;
   conflicting.list = 1;
-  err = session_query(session, &conflicting, &out);
+  err = zo_query(&conflicting, &out);
   CHECK(err != NULL && *err != '\0');
   CHECK(out == NULL);
   zo_free(err);
@@ -157,16 +159,37 @@ int main(int argc, char **argv) {
 
   zo_stats_t stats;
   memset(&stats, 0, sizeof(stats));
-  CHECK(session_stats(session, &stats) == NULL);
+  CHECK(zo_stats(&stats) == NULL);
   CHECK(stats.adds == 1 && stats.queries == 1 && stats.entries == 1);
 
-  /* Teardown reports errors as well (a panic in the destructor is the only
-   * cause), so the message is checked and released like any other. */
-  err = session_destroy(session);
-  session = NULL; /* set before CHECK so the fail path cannot double-destroy */
+  CHECK(zo_remove(target) == NULL);
+  memset(&stats, 0, sizeof(stats));
+  CHECK(zo_stats(&stats) == NULL);
+  CHECK(stats.removes == 1 && stats.entries == 0);
+
+  /* zo_shutdown drops the global session and resets its counters. */
+  err = zo_shutdown();
   CHECK(err == NULL);
+  initialized = 0;
+
+  err = zo_add(target, 1.0);
+  CHECK(err != NULL && *err != '\0');
+  CHECK(strstr(err, "not initialized") != NULL);
   zo_free(err);
   err = NULL;
+
+  /* The module can be reloaded: init after shutdown works again, and the
+   * database stays usable across the destroy/create cycle. */
+  CHECK(zo_init() == NULL);
+  initialized = 1;
+  CHECK(zo_add(target, 1.0) == NULL);
+  CHECK(zo_query(&options, &out) == NULL);
+  CHECK(out != NULL && strstr(out, target) != NULL);
+  zo_free(out);
+  out = NULL;
+  err = zo_shutdown();
+  CHECK(err == NULL);
+  initialized = 0;
 
   DL_CLOSE(lib);
   lib = NULL;
@@ -179,11 +202,8 @@ fail:
     zo_free(out);
   if (err && zo_free)
     zo_free(err);
-  if (session && session_destroy && zo_free) {
-    char *destroy_err = session_destroy(session);
-    if (destroy_err)
-      zo_free(destroy_err);
-  }
+  if (initialized && zo_shutdown)
+    zo_shutdown();
   if (lib)
     DL_CLOSE(lib);
   if (target) {

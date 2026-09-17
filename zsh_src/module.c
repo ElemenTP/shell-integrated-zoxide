@@ -28,6 +28,9 @@
  * the returned message with the operation name and release it with zo_free();
  * an empty message means "failed silently" (fzf Ctrl-C) and prints nothing.
  *
+ * The FFI owns one process-global session: boot_ calls zo_init() and cleanup_
+ * calls zo_shutdown(). The C shim keeps no session handle of its own.
+ *
  * Loading in zsh:
  *   module_path+=(/path/to/zoxide_native)
  *   zmodload zoxide_native
@@ -78,12 +81,6 @@ static struct features module_features = {
     NULL,   0,                                /* parameter definitions */
     0,                                        /* n_abstract */
 };
-
-/* ------------------------------------------------------------------ */
-/* Session state (created in boot_, destroyed in cleanup_)            */
-/* ------------------------------------------------------------------ */
-
-static zo_session_t *g_session = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -175,11 +172,6 @@ static void report_query_error(char *err) {
  */
 static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
                       UNUSED(Options ops), UNUSED(int func)) {
-  if (!g_session) {
-    zwarnnam(MODNAME, "%s: session not initialized", BUILTIN_ZOXIDE_ADD);
-    return 1;
-  }
-
   double score = 1.0;
   char *score_str = get_str_param("ZOXIDE_ADD_SCORE");
   if (score_str) {
@@ -208,7 +200,7 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
 
     char *err = NULL;
     for (size_t i = 0; i < paths_len; i++) {
-      err = zo_session_add(g_session, paths[i], score);
+      err = zo_add(paths[i], score);
       if (err)
         break;
     }
@@ -222,11 +214,10 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
 
   char *path = get_str_param("ZOXIDE_ADD_PATH");
   if (!path) {
-    zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set",
-             BUILTIN_ZOXIDE_ADD);
+    zwarnnam(MODNAME, "%s: ZOXIDE_ADD_PATH is not set", BUILTIN_ZOXIDE_ADD);
     return 1;
   }
-  char *err = zo_session_add(g_session, path, score);
+  char *err = zo_add(path, score);
   zsfree(path);
   if (err) {
     report_ffi_error(BUILTIN_ZOXIDE_ADD, err);
@@ -247,11 +238,6 @@ static int bin_zo_add(UNUSED(char *name), UNUSED(char **argv),
  */
 static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
                         UNUSED(Options ops), UNUSED(int func)) {
-  if (!g_session) {
-    zwarnnam(MODNAME, "%s: session not initialized", BUILTIN_ZOXIDE_QUERY);
-    return 1;
-  }
-
   size_t keywords_len = 0;
   char **keywords = get_arr_param("ZOXIDE_QUERY_KEYWORDS", &keywords_len);
 
@@ -270,7 +256,7 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
   options.score = get_int_param("ZOXIDE_QUERY_SCORE") != 0;
 
   char *out = NULL;
-  char *err = zo_session_query(g_session, &options, &out);
+  char *err = zo_query(&options, &out);
   zsfree(exclude);
   zsfree(base_dir);
   if (keywords_len > 0)
@@ -304,11 +290,6 @@ static int bin_zo_query(UNUSED(char *name), UNUSED(char **argv),
  */
 static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
                          UNUSED(Options ops), UNUSED(int func)) {
-  if (!g_session) {
-    zwarnnam(MODNAME, "%s: session not initialized", BUILTIN_ZOXIDE_REMOVE);
-    return 1;
-  }
-
   /* Same scalar/array distinction as zoxide_add: getaparam() only returns
    * non-NULL for array parameters. */
   if (getaparam((char *)"ZOXIDE_REMOVE_PATHS")) {
@@ -320,7 +301,7 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
 
     char *err = NULL;
     for (size_t i = 0; i < paths_len; i++) {
-      err = zo_session_remove(g_session, paths[i]);
+      err = zo_remove(paths[i]);
       if (err)
         break;
     }
@@ -334,7 +315,7 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
 
   char *path = get_str_param("ZOXIDE_REMOVE_PATHS");
   if (path) {
-    char *err = zo_session_remove(g_session, path);
+    char *err = zo_remove(path);
     zsfree(path);
     if (err) {
       report_ffi_error(BUILTIN_ZOXIDE_REMOVE, err);
@@ -385,14 +366,9 @@ static int bin_zo_stats(UNUSED(char *name), char **argv, UNUSED(Options ops),
     argv++;
   }
 
-  if (!g_session) {
-    zwarnnam(MODNAME, "%s: session not initialized", BUILTIN_ZOXIDE_STATS);
-    return 1;
-  }
-
   zo_stats_t stats;
   memset(&stats, 0, sizeof(stats));
-  char *err = zo_session_stats(g_session, &stats);
+  char *err = zo_stats(&stats);
   if (err) {
     report_ffi_error(BUILTIN_ZOXIDE_STATS, err);
     return 1;
@@ -416,7 +392,7 @@ static int bin_zo_stats(UNUSED(char *name), char **argv, UNUSED(Options ops),
     printf("zoxide_native session stats: adds=%llu queries=%llu removes=%llu\n",
            stats.adds, stats.queries, stats.removes);
     if (verbose) {
-      printf("  database: %llu entries in memory\n", stats.entries);
+      printf("  database: %llu entries on disk\n", stats.entries);
     }
   }
   return 0;
@@ -442,17 +418,13 @@ int enables_(Module m, int **enables) {
 
 /**/
 int boot_(UNUSED(Module m)) {
-  /* zo_session_create writes the handle to *out and returns the error, if
-   * any (NULL = success). g_session is left NULL on failure so the builtins
-   * refuse to run. */
-  char *err = zo_session_create(&g_session);
+  /* zo_init is idempotent and returns the error string, if any (NULL =
+   * success). The module owns no session handle: the FFI keeps one global
+   * session for the process. */
+  char *err = zo_init();
   if (err) {
-    zwarnnam(MODNAME, "failed to create session: %s", err);
+    zwarnnam(MODNAME, "failed to initialize session: %s", err);
     zo_free(err);
-    return 1;
-  }
-  if (!g_session) {
-    zwarnnam(MODNAME, "failed to create session: unknown error");
     return 1;
   }
   return 0;
@@ -460,15 +432,12 @@ int boot_(UNUSED(Module m)) {
 
 /**/
 int cleanup_(Module m) {
-  if (g_session) {
-    /* Destroy reports an error only if dropping the session panicked; there
-     * is nothing to retry, but surface it so the bug is visible. */
-    char *err = zo_session_destroy(g_session);
-    if (err) {
-      zwarnnam(MODNAME, "failed to destroy session: %s", err);
-      zo_free(err);
-    }
-    g_session = NULL;
+  /* Reset the global session (counters) before unloading. zo_shutdown
+   * is a no-op when boot_ never succeeded. */
+  char *err = zo_shutdown();
+  if (err) {
+    zwarnnam(MODNAME, "failed to shutdown session: %s", err);
+    zo_free(err);
   }
 
   /* Disable all features before teardown. */

@@ -3,7 +3,8 @@
 # test_unload_zoxide_zsh.sh — zsh unload/reload regression test.
 #
 # The module owns no threads or global runtime, so zmodload -u must be safe and
-# the next zmodload must create a fresh session against the same database.
+# the next zmodload must reinitialize the global session against the same
+# database.
 
 set -eu
 
@@ -29,6 +30,12 @@ module_path=("$MODULE_DIR" $module_path)
 # zmodload succeeds. Run in a subshell so the plugin's hooks don't leak into
 # the direct zmodload loop below.
 (
+  # Isolate discovery from any user/system-wide installed copy so the bad
+  # ZOXIDE_NATIVE_DIR really is the only candidate.
+  export HOME="$TMP_DIR/fake-home"
+  export XDG_DATA_HOME="$TMP_DIR/fake-xdg"
+  mkdir -p "$HOME" "$XDG_DATA_HOME"
+
   ZOXIDE_NATIVE_DIR="$TMP_DIR/does-not-exist"
   if source "$SCRIPT_DIR/../zsh_src/zoxide-native.plugin.zsh" >/dev/null 2>&1; then
     print -u2 "FAIL: plugin load with a bad module dir should fail"
@@ -59,6 +66,14 @@ for i in 1 2 3; do
 
   ZOXIDE_ADD_PATH="$TARGET_DIR"
   zoxide_add
+
+  # zo_shutdown in cleanup_ must reset the global counters, so every reload
+  # starts from adds=1 (the single add above).
+  zoxide_stats -q
+  [[ "${ZOXIDE_STATS_ADDS}" == "1" ]] || {
+    print -u2 "FAIL: counters were not reset on reload (iteration $i): adds=${ZOXIDE_STATS_ADDS}"
+    exit 1
+  }
 
   unset ZOXIDE_QUERY_EXCLUDE ZOXIDE_QUERY_BASE_DIR
   typeset -g ZOXIDE_QUERY_ALL=0

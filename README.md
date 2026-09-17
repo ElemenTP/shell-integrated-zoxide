@@ -127,7 +127,7 @@ source /path/to/shell-integrated-zoxide/zsh_src/zoxide-native.plugin.zsh
 
 插件会：
 
-- 加载 `zoxide_native` 模块（zsh 在所有平台都使用 `.so` 后缀）并创建进程内 session（只保存计数器；数据库按命令打开/关闭）
+- 加载 `zoxide_native` 模块（zsh 在所有平台都使用 `.so` 后缀）；`boot_` 初始化进程内全局 session（只保存计数器，数据库按命令打开/关闭），`cleanup_` 在卸载时关闭它
 - 注册 `chpwd` hook：工作目录变化时调用进程内 `zoxide_add`（原版默认的 pwd hook）
 - 定义 `z` / `zi`：调用进程内 `zoxide_query`，结果写入 `$ZOXIDE_RESULT`
 - 安装与原版 `zoxide init zsh` 一致的补全
@@ -166,9 +166,9 @@ Import-Module ~/.local/share/pwsh/modules/zoxide-native/zoxide-native.psd1
 
 - 以 `zoxide-native` 模块名加载（清单 `zoxide-native.psd1` + 脚本模块 `zoxide-native.psm1`）
 - 加载托管封装 `ZoxideNative.dll`（P/Invoke 调用 `zoxide_ffi`）
-- 惰性创建进程内 session；每个 `add` / `query` / `remove` 都独立打开/关闭数据库，与原版二进制行为一致
+- 导入时创建进程内全局 session（`Initialize`，内部 `zo_init`），移除模块时销毁（`Shutdown`，内部 `zo_shutdown`）；每个 `add` / `query` / `remove` 都独立打开/关闭数据库，与原版二进制行为一致
 - 把原版 pwd/prompt hook 改为只在工作目录变化时调用进程内 `zoxide add`
-- 定义 `z` / `zi` 别名，查询直接调用 `Session.Query`
+- 定义 `z` / `zi` 别名，查询直接调用静态 `[ZoxideNative.Session]::Query(...)`
 - 查询失败不抛异常：no-match 输出 `zoxide-native: no match found`，fzf Ctrl-C 静默退出
 - 导出 `Get-ZoxideNativeVersion` / `Get-ZoxideNativeStats` / `Set-ZoxideEnv` / `Remove-ZoxideEnv`
 
@@ -199,10 +199,10 @@ cmake --build build --config Release --target check            # CTest（FFI 系
 
 | 测试                        | 类型       | 说明                                        |
 | --------------------------- | ---------- | ------------------------------------------- |
-| `test-rust` / `test-upstream` | 单元测试 | `rust_src` FFI 测试 + 上游 zoxide session/db/权限测试 |
-| `ffi_smoke.c`               | 系统测试   | `dlopen` 真实 `libzoxide_ffi` 并验证 ABI    |
+| `test-rust` / `test-upstream` | 单元测试 | `rust_src` 全局 session/FFI 测试 + 上游 zoxide session/db/权限测试 |
+| `ffi_smoke.c`               | 系统测试   | `dlopen` 真实 `libzoxide_ffi`，验证 ABI 与全局 session 生命周期 |
 | `test_zoxide_zsh.sh`        | 集成测试   | zmodload、变量协议、跨进程可见性、非 ASCII EXCLUDE/BASE_DIR、插件函数 |
-| `test_unload_zoxide_zsh.sh` | 集成测试   | 失败加载可重试 + 反复 `zmodload -u` / `zmodload` |
-| `test_pwsh.ps1`             | 集成测试   | 模块导入、hook、z/zi、fzf、失败查询不抛异常 |
+| `test_unload_zoxide_zsh.sh` | 集成测试   | 失败加载可重试 + 反复 `zmodload -u` / `zmodload` 并校验计数器归零 |
+| `test_pwsh.ps1`             | 集成测试   | 模块导入/移除重载、hook、z/zi、fzf、失败查询不抛异常 |
 
 zoxide 上游的 `session.rs` 测试由 `test-upstream` 目标执行。

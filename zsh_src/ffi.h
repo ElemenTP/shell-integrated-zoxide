@@ -3,6 +3,15 @@
  *
  * Include this header in the zsh module shim (module.c) and in C test
  * harnesses. The declarations must stay in sync with rust_src/src/ffi.rs.
+ *
+ * The library exposes exactly one process-global zoxide session. It is
+ * created by zo_init() and dropped again by zo_shutdown(); the data calls
+ * (zo_add / zo_remove / zo_query / zo_stats) take no session handle.
+ * zoxide itself is a CLI whose state is meant to die with the process, and
+ * each shell host loads this module once, so a multi-session API would only
+ * add handle plumbing without a consumer. Access to the global session is
+ * serialized internally, so the FFI is sound even if a host calls it from
+ * more than one thread.
  */
 #ifndef ZO_FFI_H
 #define ZO_FFI_H
@@ -13,10 +22,7 @@
 extern "C" {
 #endif
 
-/* Opaque session handle. */
-typedef struct zo_session zo_session_t;
-
-/* Query parameters for zo_session_query. */
+/* Query parameters for zo_query. */
 typedef struct {
   const char *const *keywords; /* NULL when keywords_len == 0 */
   size_t keywords_len;         /* Number of entries in keywords */
@@ -42,7 +48,7 @@ typedef struct {
  * Errors are RETURN VALUES, not stored state. Every call that can fail
  * returns the error message itself:
  *
- *     char *err = zo_session_add(session, path, 1.0);
+ *     char *err = zo_add(path, 1.0);
  *     if (err) {
  *         fprintf(stderr, "zoxide: %s\n", err);
  *         zo_free(err);            // caller owns the message
@@ -55,40 +61,37 @@ typedef struct {
  *     (zoxide reports fzf Ctrl-C / SilentExit that way), so callers test the
  *     pointer first and print only when *err is non-zero.
  *
- * Nothing is stored in the session and nothing is stored in a global, so
- * concurrent sessions (or one session used from different threads) can never
- * clobber each other's error, and there is no thread_local! state that could
- * outlive dlclose() of this library.
- *
- * zo_session_create is the one call whose payload is not a string: it writes
- * the handle to an out-parameter and returns the error instead.
- * zo_session_destroy returns an error string too — a panic while dropping the
- * session is the only way teardown can fail, and the message makes such a bug
- * visible for debugging. zo_free cannot fail and therefore has no error return.
+ * Error values are carried by the individual call, so there is no error slot
+ * to clear or stale, and there is no thread_local! state that could outlive
+ * dlclose() of this library. zo_shutdown and zo_free cannot fail and
+ * therefore return void.
  */
 
-/* Create a session. Returns NULL on success and writes a non-NULL handle to
- * *session; on failure returns an error message (free with zo_free) and sets
- * *session to NULL. */
-char *zo_session_create(zo_session_t **session);
+/* Initialize the process-global session. Idempotent: an already initialized
+ * session makes this a successful no-op. Returns NULL on success, or an
+ * allocated error message (free with zo_free). */
+char *zo_init(void);
 
-/* Destroy a session. Returns NULL on success, or an allocated error message
- * (free with zo_free) for diagnostics. Passing NULL is a successful no-op. */
-char *zo_session_destroy(zo_session_t *session);
+/* Drop the process-global session, resetting its counters. The on-disk
+ * database is untouched. Calling this without a previous zo_init is a safe
+ * no-op;*/
+char *zo_shutdown(void);
 
 /* Database operations. Return NULL on success, or an error message that the
- * caller must free with zo_free() — including for "path not in database". */
-char *zo_session_add(zo_session_t *session, const char *path, double score);
-char *zo_session_remove(zo_session_t *session, const char *path);
+ * caller must free with zo_free() — including for "path not in database".
+ * Called before zo_init, they report that the session is not initialized. */
+char *zo_add(const char *path, double score);
+char *zo_remove(const char *path);
 
 /* Run a query. On success (NULL return) *out is a Rust-allocated UTF-8 string
  * that the caller frees with zo_free(). On failure *out is set to NULL and the
  * error message is returned. */
-char *zo_session_query(zo_session_t *session, const zo_query_options_t *options,
-                       char **out);
+char *zo_query(const zo_query_options_t *options, char **out);
 
-/* Retrieve session counters. NULL on success, else an error message. */
-char *zo_session_stats(zo_session_t *session, zo_stats_t *out);
+/* Retrieve session counters. NULL on success, else an error message. The
+ * adds/queries/removes counters are reset by zo_shutdown; entries is read
+ * from the on-disk database for this call. */
+char *zo_stats(zo_stats_t *out);
 
 /* Free a string returned by any function above (query results and error
  * messages). NULL-safe, cannot fail. */

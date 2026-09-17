@@ -8,7 +8,9 @@
     the `zoxide add` / `zoxide query` process invocations with the in-process
     [ZoxideNative.Session] managed wrapper. Like the original binary, every
     command opens and closes the database, so updates from other shells are
-    picked up by the next command.
+    picked up by the next command. The native side keeps one process-global
+    session, initialized when this module is imported and dropped when it is
+    removed.
 
     The native library (libzoxide_ffi.so / libzoxide_ffi.dylib /
     zoxide_ffi.dll) must be present next to ZoxideNative.dll. To load it from
@@ -42,21 +44,15 @@ if (-not $env:ZOXIDE_FFI_PATH) {
     }
 }
 
-# ---- Native session (created lazily, lives for the pwsh process) -------------
-$script:__Session = $null
-
-function Get-Session {
-    if ($null -eq $script:__Session) {
-        # The native session reads _ZO_DATA_DIR through getenv(). Copy the
-        # managed value into the native environment before creating it.
-        $dataDir = [System.Environment]::GetEnvironmentVariable('_ZO_DATA_DIR')
-        if ($null -ne $dataDir) {
-            [ZoxideNative.ZoxideEnvironment]::Set('_ZO_DATA_DIR', $dataDir)
-        }
-        $script:__Session = [ZoxideNative.Session]::new()
-    }
-    return $script:__Session
+# ---- Native session (one process-global session, created at import) ---------
+# The native session reads _ZO_DATA_DIR through getenv(), so copy the managed
+# value into the native environment before initializing it. The environment
+# helper below syncs the remaining _ZO_* variables.
+$dataDir = [System.Environment]::GetEnvironmentVariable('_ZO_DATA_DIR')
+if ($null -ne $dataDir) {
+    [ZoxideNative.ZoxideEnvironment]::Set('_ZO_DATA_DIR', $dataDir)
 }
+[ZoxideNative.Session]::Initialize()
 
 # ---- Environment helper for native-visible variables -------------------------
 # On Linux/macOS, $env:_ZO_MAXAGE = 100 only updates the .NET environment
@@ -113,7 +109,7 @@ function Get-ZoxideNativeStats {
     .SYNOPSIS
         Returns session counters for the current zoxide session.
     #>
-    return (Get-Session).GetStatsReport()
+    return [ZoxideNative.Session]::GetStatsReport()
 }
 
 # ---- The rest is adapted from zoxide init powershell -------------------------
@@ -153,7 +149,7 @@ function global:__zoxide_hook {
     $result = __zoxide_pwd
     if ($result -ne $script:__zoxide_oldpwd) {
         if ($null -ne $result) {
-            (Get-Session).Add($result, 1.0)
+            [ZoxideNative.Session]::Add($result, 1.0)
         }
         $script:__zoxide_oldpwd = $result
     }
@@ -194,7 +190,7 @@ function Invoke-ZoxideQuery {
         [bool]$List = $false,
         [bool]$Score = $false
     )
-    return (Get-Session).Query(
+    return [ZoxideNative.Session]::Query(
         $Keywords, $Exclude, $BaseDir, $All, $Interactive, $List, $Score)
 }
 
@@ -276,8 +272,5 @@ $MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = {
     } else {
         Remove-Item -Path function:\prompt -ErrorAction SilentlyContinue
     }
-    if ($null -ne $script:__Session) {
-        try { $script:__Session.Dispose() } catch {}
-        $script:__Session = $null
-    }
+    try { [ZoxideNative.Session]::Shutdown() } catch {}
 }

@@ -146,6 +146,16 @@ try {
     if ($env:_ZO_ECHO -ne '0') { throw '_ZO_ECHO was not set in the .NET environment' }
     Remove-ZoxideEnv '_ZO_ECHO'
     Write-Host 'PASS: native environment helpers'
+
+    # Removing the module calls Shutdown; re-importing must start a fresh
+    # session whose counters are zeroed.
+    Remove-Module zoxide-native -Force
+    Import-Module zoxide-native -Force -ErrorAction Stop
+    $reloadedStats = Get-ZoxideNativeStats
+    if ($reloadedStats -notmatch 'Adds: 0') {
+        throw "re-import did not reset session counters: $reloadedStats"
+    }
+    Write-Host 'PASS: module re-import resets session counters'
 }
 finally {
     Get-Module zoxide-native -ErrorAction SilentlyContinue | Remove-Module -Force -ErrorAction SilentlyContinue
