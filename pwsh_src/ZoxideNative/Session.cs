@@ -175,20 +175,6 @@ public static class Session
         return Marshal.PtrToStringUTF8(ptr) ?? "unknown";
     }
 
-    /// <summary>
-    /// Consume an error pointer returned by a native call: NULL means success
-    /// (returns null), otherwise the message is copied into a managed string
-    /// and the native allocation is released with zo_free.
-    /// </summary>
-    private static string? TakeError(IntPtr error)
-    {
-        if (error == IntPtr.Zero)
-            return null;
-        string? message = Marshal.PtrToStringUTF8(error);
-        NativeMethods.Free(error);
-        return message;
-    }
-
     /// <summary>Get a human-readable session statistics report.</summary>
     public static string GetStatsReport()
     {
@@ -206,6 +192,20 @@ public static class Session
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Consume an error pointer returned by a native call: NULL means success
+    /// (returns null), otherwise the message is copied into a managed string
+    /// and the native allocation is released with zo_free.
+    /// </summary>
+    private static string? TakeError(IntPtr error)
+    {
+        if (error == IntPtr.Zero)
+            return null;
+        string? message = Marshal.PtrToStringUTF8(error);
+        NativeMethods.Free(error);
+        return message;
+    }
 
     private static NativeInput BuildInput(
         IReadOnlyList<string>? keywords,
