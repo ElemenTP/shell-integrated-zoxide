@@ -97,7 +97,8 @@ char *zo_stats(zo_stats_t *out);
  * messages). NULL-safe, cannot fail. */
 void zo_free(char *ptr);
 
-/* Return the library version string (static, must NOT be freed). */
+/* Return the upstream zoxide version embedded by this library
+ * (static, must NOT be freed). */
 const char *zo_version(void);
 
 #ifdef __cplusplus

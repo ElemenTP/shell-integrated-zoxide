@@ -1,13 +1,13 @@
 # Zoxide Native Shell Plugin
 
-将 [zoxide](https://github.com/ajeetdsouza/zoxide) 的 `add` / `query` 热路径编译为 Shell 原生动态库，实现进程内目录跳转，消除每条命令启动新进程的开销。数据库遵循原版 zoxide 的并发模型：每个命令打开并关闭 `db.zo`，因此其他 shell / 进程的更新不会被常驻内存覆盖。
+将 [zoxide](https://github.com/ajeetdsouza/zoxide) 的 `add` / `query` 热路径编译为 Shell 原生动态库，实现进程内目录跳转，消除每条命令启动新进程的开销。数据库遵循原版 zoxide 的并发模型：每个命令打开并关闭 `db.txt`，因此其他 shell / 进程的更新不会被常驻内存覆盖。
 
 ## 工作原理
 
 ```
 传统模式（每次 add / query 都启动新进程）:
-  precmd hook → zoxide add -- $PWD → 进程启动 → 打开+解析 db.zo → 写回 → 退出
-  z foo      → zoxide query foo  → 进程启动 → 打开+解析 db.zo → 输出 → 退出
+  precmd hook → zoxide add -- $PWD → 进程启动 → 打开+解析 db.txt → 写回 → 退出
+  z foo      → zoxide query foo  → 进程启动 → 打开+解析 db.txt → 输出 → 退出
 
 Native 模式（进程内执行）:
   chpwd hook → ZOXIDE_ADD_PATH=$PWD zoxide_add       → zsh builtin → FFI → zoxide cmd::Add
@@ -16,7 +16,7 @@ Native 模式（进程内执行）:
 
 FFI 不再持有常驻 `Database`，而是直接构造上游 `cmd::Add` / `cmd::Query` /
 `cmd::Remove` 并执行其 `Run` 实现。每次命令都像原版二进制一样打开、保存、
-关闭 `db.zo`，复用上游已验证的并发行为。
+关闭 `db.txt`，复用上游已验证的并发行为。
 
 ## 支持平台
 
@@ -43,7 +43,9 @@ cmake -B build -S .
 cmake --build build --config Release
 ```
 
-如果本地没有这两个 checkout，CMake 会从 GitHub 下载 `in-process` 分支的 zoxide、从 SourceForge 下载并配置 zsh 5.9.2。若本地 zoxide checkout 只读，CMake 会自动复制到构建目录中供 cargo 使用。
+如果本地没有这两个 checkout，CMake 会从 GitHub 拉取固定 commit 的 zoxide、从 SourceForge 下载并配置 zsh 5.9.2。若本地 zoxide checkout 只读，CMake 会自动复制到构建目录中供 cargo 使用。
+
+`AUTO` 拉取的 zoxide commit 由 `ZOXIDE_GIT_TAG` 钉住（默认是当前 `in-process` tip），不是移动中的 `in-process` 分支，因此构建可复现；rebase 分支后需要把 pin 更新到新的 tip（本地 checkout 与 pin 不一致时 CMake 只给出 warning，方便开发）。FFI 的 `zo_version` / `zoxide_version` / `Get-ZoxideNativeVersion` 返回的是**上游 zoxide 版本**，由 `rust_src/build.rs` 从 zoxide 源码树的 `Cargo.toml` 读取（CMake 也会以 `ZOXIDE_VERSION` 传入，可用 `-DZOXIDE_VERSION=` 覆盖），不是 wrapper 自己的 0.1.0。更新 pin 或上游版本后需要重新运行 `cmake -B build -S .`。
 
 ### 使用本地源码
 
@@ -76,6 +78,8 @@ cmake --install build --config Release --prefix ~/.local
 | 选项                 | 默认值    | 说明                                                    |
 | -------------------- | --------- | ------------------------------------------------------- |
 | `ZOXIDE_SOURCE`      | `AUTO`    | zoxide 源码：`AUTO` 使用符号链接/GitHub，或本地路径      |
+| `ZOXIDE_GIT_TAG`     | `0ce4b89…`（当前 in-process tip） | `ZOXIDE_SOURCE=AUTO` 且本地无 checkout 时钉住的 zoxide commit；也可写 branch/tag |
+| `ZOXIDE_VERSION`     | 空（自动） | FFI 上报的上游 zoxide 版本；空则从源码树的 `Cargo.toml` 派生 |
 | `ZSH_SOURCE`         | `AUTO`    | zsh 源码：`AUTO` 使用符号链接/下载 zsh 5.9.2，或本地路径 |
 | `ZSH_VERSION`        | `5.9.2`   | 下载 zsh 的版本（ZSH_SOURCE=AUTO 时）                   |
 | `BUILD_ZSH_MODULE`   | `ON`      | 构建 zsh 可加载模块                                     |
@@ -143,6 +147,9 @@ source /path/to/shell-integrated-zoxide/zsh_src/zoxide-native.plugin.zsh
 | `zoxide_version` | —                                                   | `ZOXIDE_VERSION`  |
 | `zoxide_stats`   | —                                                   | `ZOXIDE_STATS_*`  |
 
+`zoxide_version` 打印并写入嵌入的**上游 zoxide 版本**（不是 wrapper 的
+0.1.0）；`-q` 只写变量不打印。
+
 ```zsh
 ZOXIDE_ADD_PATH="$PWD" zoxide_add
 
@@ -171,6 +178,7 @@ Import-Module ~/.local/share/pwsh/modules/zoxide-native/zoxide-native.psd1
 - 定义 `z` / `zi` 别名，查询直接调用静态 `[ZoxideNative.Session]::Query(...)`
 - 查询失败不抛异常：no-match 输出 `zoxide-native: no match found`，fzf Ctrl-C 静默退出
 - 导出 `Get-ZoxideNativeVersion` / `Get-ZoxideNativeStats` / `Set-ZoxideEnv` / `Remove-ZoxideEnv`
+- `Get-ZoxideNativeVersion` 返回嵌入的上游 zoxide 版本（不是 wrapper 的 0.1.0）
 
 Linux/macOS 上 `$env:_ZO_*` 只更新 .NET 环境块，Rust 的 `getenv()` 看不到。请使用：
 

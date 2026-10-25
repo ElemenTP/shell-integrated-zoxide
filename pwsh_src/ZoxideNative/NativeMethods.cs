@@ -118,7 +118,8 @@ internal static unsafe partial class NativeMethods
     internal static partial void Free(IntPtr ptr);
 
     /// <summary>
-    /// Return the library version as a static UTF-8 string. Must NOT be freed.
+    /// Return the embedded upstream zoxide version as a static UTF-8 string.
+    /// Must NOT be freed.
     /// </summary>
     [LibraryImport(LibName, EntryPoint = "zo_version")]
     internal static partial IntPtr Version();

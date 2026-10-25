@@ -49,6 +49,15 @@ try {
     if ([string]::IsNullOrWhiteSpace($version)) {
         throw 'Get-ZoxideNativeVersion returned an empty version'
     }
+    $expectedVersion = $env:EXPECTED_ZOXIDE_VERSION
+    if (-not [string]::IsNullOrWhiteSpace($expectedVersion)) {
+        if ($version -ne $expectedVersion) {
+            throw "native version $version != expected $expectedVersion"
+        }
+    }
+    elseif ($version -notmatch '^\d+\.\d+\.\d+') {
+        throw "native version is not a semver: $version"
+    }
     Write-Host "PASS: module imported, native version $version"
 
     # _ZO_DATA_DIR must be visible to both .NET and the native Rust library.

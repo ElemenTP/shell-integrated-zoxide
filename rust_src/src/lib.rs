@@ -11,7 +11,7 @@
 //! `in-process` feature, which exposes `zoxide::session::Session`. `Session`
 //! deliberately does not keep the database open: every add/query/remove
 //! constructs the same command structs as the zoxide CLI and opens/closes
-//! `db.zo` per command, so updates from other shells are never overwritten
+//! `db.txt` per command, so updates from other shells are never overwritten
 //! with stale in-memory state.
 //!
 //! # Safety
@@ -20,7 +20,7 @@
 //! `zo_shutdown` drops it; the data calls (`zo_add` / `zo_remove` /
 //! `zo_query` / `zo_stats`) operate on it without any handle argument. The
 //! session is stateless apart from counters, so dropping it only resets those
-//! counters and never touches `db.zo`.
+//! counters and never touches `db.txt`.
 //!
 //! All FFI functions use `catch_unwind` wrappers to prevent Rust panics from
 //! unwinding across the FFI boundary. Errors are reported as **return

@@ -329,7 +329,7 @@ static int bin_zo_remove(UNUSED(char *name), UNUSED(char **argv),
 /* Builtin: zoxide_version                                            */
 /* ------------------------------------------------------------------ */
 
-/** Store the zoxide-native FFI version in ZOXIDE_VERSION. */
+/** Store the embedded upstream zoxide version in ZOXIDE_VERSION. */
 static int bin_zo_version(UNUSED(char *name), char **argv, UNUSED(Options ops),
                           UNUSED(int func)) {
   int quiet = 0;

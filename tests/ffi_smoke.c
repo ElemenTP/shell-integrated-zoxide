@@ -106,6 +106,10 @@ int main(int argc, char **argv) {
 
   const char *version = zo_version();
   CHECK(version != NULL && version[0] != '\0');
+  /* CMake passes the upstream zoxide version derived from the checkout. */
+  const char *expected_version = getenv("ZOXIDE_VERSION");
+  if (expected_version != NULL && expected_version[0] != '\0')
+    CHECK(strcmp(version, expected_version) == 0);
   snprintf(version_buf, sizeof(version_buf), "%s", version);
 
 #ifdef _WIN32
@@ -160,7 +164,8 @@ int main(int argc, char **argv) {
   zo_stats_t stats;
   memset(&stats, 0, sizeof(stats));
   CHECK(zo_stats(&stats) == NULL);
-  CHECK(stats.adds == 1 && stats.queries == 1 && stats.entries == 1);
+  /* zoxide counts the attempted (failing) query above, so queries == 2. */
+  CHECK(stats.adds == 1 && stats.queries == 2 && stats.entries == 1);
 
   CHECK(zo_remove(target) == NULL);
   memset(&stats, 0, sizeof(stats));
@@ -211,7 +216,7 @@ fail:
   }
   if (data_dir) {
     char db_path[1024];
-    snprintf(db_path, sizeof(db_path), "%s/db.zo", data_dir);
+    snprintf(db_path, sizeof(db_path), "%s/db.txt", data_dir);
     remove(db_path);
     remove(data_dir);
   }

@@ -43,7 +43,7 @@ Cmd::Add(Add { paths: vec![path], score: Some(score) }).run()?;
 Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
 ```
 
-每个命令内部由上游 `Database::open()` 打开、保存并关闭 `db.zo`，与
+每个命令内部由上游 `Database::open()` 打开、保存并关闭 `db.txt`，与
 `zoxide` 二进制的并发行为完全一致。`Session` 只保留 `adds/queries/removes`
 计数器；`entry_count()` 按需临时打开一次数据库读取。
 
@@ -102,7 +102,7 @@ Cmd::Remove(Remove { paths: vec![path.to_owned()] }).run()?;
   存储。
 - `zo_init()` 建立**进程全局唯一**的 session，幂等；数据操作不带 handle，
   未初始化时返回 `<op>: session is not initialized`。
-- `zo_shutdown()` 丢弃全局 session、清零计数器，磁盘 `db.zo` 不受影响；
+- `zo_shutdown()` 丢弃全局 session、清零计数器，磁盘 `db.txt` 不受影响；
   未初始化时是无操作。`zo_free`不可能失败，因此返回void。
 - `zo_query` 成功时 `*out` 是结果字符串、失败时 `*out` 被置 NULL
   （两种情况都要 `zo_free`：结果是结果，错误消息本身也是分配出来的）。
@@ -294,8 +294,8 @@ libc `setenv` / `unsetenv`。`_ZO_DATA_DIR` 在 `Initialize()` 之前同步到
 ### 5.2 真实 OUTPUT 规则
 
 `libzoxide_ffi.so` 由 `add_custom_command(OUTPUT ...)` 生成，依赖
-`rust_src/src`、`Cargo.toml`、`Cargo.lock` 以及 zoxide 上游源码。普通
-`add_custom_target` 没有 up-to-date 判断，会导致每次构建都重跑 cargo。
+`rust_src/src`、`build.rs`、`Cargo.toml`、`Cargo.lock` 以及 zoxide 上游源码。
+普通 `add_custom_target` 没有 up-to-date 判断，会导致每次构建都重跑 cargo。
 
 ### 5.3 zsh 模块 RPATH
 
@@ -309,7 +309,36 @@ libc `setenv` / `unsetenv`。`_ZO_DATA_DIR` 在 `Initialize()` 之前同步到
 - Linux 链接选项 `-Wl,--allow-shlib-undefined -Wl,-z,lazy`（zsh 宿主提供内部符号）
 - macOS 链接选项 `-Wl,-undefined,dynamic_lookup`
 
-### 5.4 macOS dylib 修复
+### 5.4 版本号、上游 pin 与 FFI 版本上报
+
+三者关系：
+
+- **`ZOXIDE_GIT_TAG`**（CMake cache）：`ZOXIDE_SOURCE=AUTO` 且本地没有
+  `zoxide/` checkout 时拉取的 zoxide commit（也可以是 branch/tag）。它钉住的
+  是上游源码，rebase `in-process` 之后要手动 bump；本地 checkout 的 HEAD 与
+  它不一致时 CMake 只 warning，方便 in-tree 开发。
+- **`ZOXIDE_VERSION`**（CMake cache，空则自动）：从
+  `${ZOXIDE_SRC_DIR}/Cargo.toml` 的 `version = "x.y.z"` 解析。
+  `rust_src/build.rs` 通过环境变量拿到它（直接 `cargo build` 时则自己读
+  `../zoxide/Cargo.toml`），以 `cargo:rustc-env=ZOXIDE_VERSION=…` 注入；
+  `zo_version()` 返回的就是这个**上游 zoxide 版本**。Cargo 的
+  `[package].version` 只能是字面量，不能从依赖派生，所以 `zoxide-ffi`
+  自己的 crate 版本保持独立（当前 0.1.0），语义是 wrapper 版本。
+- **`ZOXIDE_COMMIT`**：CMake 把 pin 传给 build.rs 并注入 `env!("ZOXIDE_COMMIT")`，
+  留给诊断/未来的 `--version` 输出使用；它不是实际 checkout HEAD，本地开发
+  时不必依赖它。
+- **`rust_src/Cargo.lock`**：上游依赖变化后需要刷新；FFI 用
+  `default-features = false` 构建，release 构建设置可能与上游 in-tree
+  `cargo check` 不同，bump 后要跑一次 release 测试。
+
+`ZOXIDE_VERSION` 同时用于：
+
+- cargo build 的 `build.rs` 注入；
+- Rust `test_version` 精确断言 `zo_version() == env!("ZOXIDE_VERSION")`；
+- `test-rust` / `ffi_smoke` / `test-zsh` / `test-pwsh` 的环境变量
+  （`ZOXIDE_VERSION` / `EXPECTED_ZOXIDE_VERSION`），让集成测试核对版本展示。
+
+### 5.5 macOS dylib 修复
 
 zsh 通过 `DL_EXT` 宏把所有平台的 loadable module 后缀都定为 `.so`，macOS
 也不例外。因此 CMake 显式设置 `SUFFIX ".so"`（即使产物是 Mach-O dylib），
@@ -331,9 +360,9 @@ strip 在 macOS 使用 `-u`（只移除调试符号，保留导出符号），Li
 
 | 层         | 位置                                      | 说明                                   |
 | ---------- | ----------------------------------------- | -------------------------------------- |
-| 单元测试   | `rust_src/src/ffi.rs`                     | 全局 session 生命周期、未初始化错误、null 安全、输出槽清零、roundtrip、stats |
+| 单元测试   | `rust_src/src/ffi.rs`                     | 全局 session 生命周期、版本精确断言、未初始化错误、null 安全、输出槽清零、roundtrip、stats |
 | 单元测试   | zoxide `src/session.rs` + `db`            | 跨 session 可见性、命令复用、0600 权限；`test-upstream` 目标执行 |
-| 系统测试   | `tests/ffi_smoke.c`                       | dlopen 真实 .so，验证 ABI、生命周期与内存所有权 |
-| 集成测试   | `tests/test_zoxide_zsh.sh`                | zmodload、变量协议、跨进程更新、非 ASCII 标量、plugin 跳转、fzf |
+| 系统测试   | `tests/ffi_smoke.c`                       | dlopen 真实 .so，验证 ABI、版本、生命周期与内存所有权 |
+| 集成测试   | `tests/test_zoxide_zsh.sh`                | zmodload、变量协议、版本展示、跨进程更新、非 ASCII 标量、plugin 跳转、fzf |
 | 集成测试   | `tests/test_unload_zoxide_zsh.sh`         | 失败加载可重试 + 卸载/重载并校验计数器归零 |
-| 集成测试   | `tests/test_pwsh.ps1`                     | 模块导入/移除重载、hook、z/zi、fzf、查询失败不抛异常 |
+| 集成测试   | `tests/test_pwsh.ps1`                     | 模块导入/移除重载、版本展示、hook、z/zi、fzf、查询失败不抛异常 |

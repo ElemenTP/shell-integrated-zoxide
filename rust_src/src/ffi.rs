@@ -171,7 +171,7 @@ fn cstr_array_to_vec(ptr: *const *const c_char, len: usize) -> Option<Vec<String
 ///
 /// `None` until `zo_init` is called (and again after `zo_shutdown`). The
 /// session has no long-lived database handle, so dropping it only resets the
-/// counters; `db.zo` itself is untouched.
+/// counters; `db.txt` itself is untouched.
 static SESSION: Mutex<Option<zoxide::session::Session>> = Mutex::new(None);
 
 /// Run `f` with the global session, or fail when `zo_init` has not been called.
@@ -203,7 +203,7 @@ fn with_session<T, E: std::fmt::Display>(
 /// session cannot be created.
 ///
 /// The session only tracks counters; each add/query/remove opens and closes
-/// `db.zo` itself, so updates made by other processes are never overwritten by
+/// `db.txt` itself, so updates made by other processes are never overwritten by
 /// stale in-memory state.
 #[unsafe(no_mangle)]
 pub extern "C" fn zo_init() -> *mut c_char {
@@ -442,7 +442,14 @@ pub unsafe extern "C" fn zo_free(ptr: *mut c_char) {
     }
 }
 
-/// Return the library version as a static string.
+/// Return the upstream zoxide version this library embeds, as a static string.
+///
+/// This is the version of the `zoxide` crate it was built against (the
+/// `in-process` feature is version-locked to it), not `zoxide-ffi`'s own
+/// wrapper version: shell users ask "which zoxide am I running?" and that is
+/// what matters. A `build.rs` derives it from the checkout (or from
+/// `ZOXIDE_VERSION`, which CMake passes), and CMake pins the checkout to a
+/// commit (`ZOXIDE_GIT_TAG`).
 ///
 /// The returned pointer is valid for the lifetime of the process and must NOT
 /// be freed. This accessor cannot fail, so it is exempt from the error
@@ -451,7 +458,7 @@ pub unsafe extern "C" fn zo_free(ptr: *mut c_char) {
 pub extern "C" fn zo_version() -> *const c_char {
     // A string literal has static storage duration and the trailing NUL is
     // included in the literal itself, so no LazyLock/allocation is needed.
-    static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
+    static VERSION: &str = concat!(env!("ZOXIDE_VERSION"), "\0");
     VERSION.as_ptr().cast()
 }
 
@@ -515,13 +522,16 @@ mod tests {
         );
     }
 
-    /// Test that version returns a non-null static string.
+    /// Test that version reports the upstream zoxide version embedded at build
+    /// time, not the wrapper crate version.
     #[test]
     fn test_version() {
         let version = zo_version();
         assert!(!version.is_null());
         let text = unsafe { CStr::from_ptr(version) }.to_str().unwrap();
-        assert!(!text.is_empty());
+        assert_eq!(text, env!("ZOXIDE_VERSION"));
+        // A version, not a path or a commit.
+        assert_eq!(text.split('.').count(), 3, "unexpected version {text:?}");
     }
 
     /// Test that zo_free handles NULL safely.
@@ -885,7 +895,7 @@ mod tests {
 
     /// Destroying and recreating the global session must leave the database
     /// fully usable: counters start over, but commands still read and write
-    /// `db.zo`.
+    /// `db.txt`.
     #[test]
     fn test_reinit_after_shutdown_reuses_database() {
         let data_dir = tempfile::tempdir().unwrap();

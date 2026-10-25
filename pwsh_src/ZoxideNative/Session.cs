@@ -168,7 +168,7 @@ public static class Session
         }
     }
 
-    /// <summary>Get the native library version string.</summary>
+    /// <summary>Get the embedded upstream zoxide version string.</summary>
     public static string Version()
     {
         IntPtr ptr = NativeMethods.Version();

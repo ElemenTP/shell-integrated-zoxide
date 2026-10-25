@@ -22,6 +22,15 @@ endif()
 # the "in-process" feature enabled.
 set(ZOXIDE_SOURCE "AUTO" CACHE STRING
     "zoxide source: 'AUTO' to use the zoxide symlink (or clone the in-process fork), or a local path")
+# The in-process feature is developed on a branch, so pin the commit (not the
+# moving branch) to keep AUTO builds reproducible. Bump this after rebasing the
+# branch; a local ZOXIDE_SOURCE checkout that differs only gets a warning.
+set(ZOXIDE_GIT_TAG "0ce4b891f624b8f400fd27bc44f7c63305ddcfa6" CACHE STRING
+    "zoxide commit/tag to fetch when ZOXIDE_SOURCE=AUTO")
+# The upstream zoxide version the FFI reports. Empty = derive it from the
+# selected checkout.
+set(ZOXIDE_VERSION "" CACHE STRING
+    "zoxide version embedded in the FFI (empty: derive from ZOXIDE_SRC_DIR/Cargo.toml)")
 # zsh source: "AUTO" (use repo symlink / download zsh 5.9.2) or local path.
 set(ZSH_SOURCE "AUTO" CACHE STRING
     "zsh source: 'AUTO' to use the zsh symlink (or download zsh 5.9.2), or path to configured source tree")
@@ -53,11 +62,18 @@ if(ZOXIDE_SOURCE STREQUAL "AUTO")
         get_filename_component(ZOXIDE_SRC_DIR "${ZOXIDE_LINK}" REALPATH)
         message(STATUS "Using existing zoxide checkout: ${ZOXIDE_SRC_DIR}")
     else()
-        message(STATUS "Fetching zoxide from GitHub...")
+        message(STATUS "Fetching zoxide from GitHub (${ZOXIDE_GIT_TAG})...")
+        # `GIT_SHALLOW` cannot check out a commit that is not the branch tip,
+        # so only shallow-clone when the pin names a branch or tag.
+        if(ZOXIDE_GIT_TAG MATCHES "^[0-9a-f]{7,40}$")
+            set(_zoxide_shallow FALSE)
+        else()
+            set(_zoxide_shallow TRUE)
+        endif()
         FetchContent_Declare(zoxide-src
             GIT_REPOSITORY "https://github.com/ElemenTP/zoxide"
-            GIT_TAG        in-process
-            GIT_SHALLOW    TRUE
+            GIT_TAG        "${ZOXIDE_GIT_TAG}"
+            GIT_SHALLOW    ${_zoxide_shallow}
         )
         FetchContent_MakeAvailable(zoxide-src)
         set(ZOXIDE_SRC_DIR "${zoxide-src_SOURCE_DIR}")
@@ -112,6 +128,40 @@ if(NOT _zoxide_real STREQUAL "${ZOXIDE_SRC_DIR}")
     message(STATUS "zoxide symlink: ${ZOXIDE_LINK} -> ${ZOXIDE_SRC_DIR}")
 endif()
 message(STATUS "zoxide source: ${ZOXIDE_SRC_DIR}")
+
+# ── zoxide version (embedded in the FFI) ──────────────────────────────────
+# The FFI reports the version of the zoxide it embeds, so derive it from the
+# resolved checkout instead of duplicating it in this file.
+if(NOT ZOXIDE_VERSION)
+    file(STRINGS "${ZOXIDE_SRC_DIR}/Cargo.toml" _zoxide_version_line
+        REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+")
+    if(_zoxide_version_line)
+        string(REGEX MATCH "\"([^\"]+)\"" _zoxide_version_match "${_zoxide_version_line}")
+        set(ZOXIDE_VERSION "${CMAKE_MATCH_1}")
+    endif()
+endif()
+if(NOT ZOXIDE_VERSION)
+    message(FATAL_ERROR
+        "Could not read the zoxide version from ${ZOXIDE_SRC_DIR}/Cargo.toml; "
+        "pass -DZOXIDE_VERSION=<x.y.z>")
+endif()
+message(STATUS "zoxide version: ${ZOXIDE_VERSION}")
+
+# A local checkout may be ahead of/behind the pin (an in-tree development
+# build); warn, but keep it buildable.
+if(EXISTS "${ZOXIDE_SRC_DIR}/.git")
+    execute_process(
+        COMMAND git -C "${ZOXIDE_SRC_DIR}" rev-parse HEAD
+        OUTPUT_VARIABLE _zoxide_head
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _zoxide_git_rc
+        ERROR_QUIET)
+    if(_zoxide_git_rc EQUAL 0 AND NOT _zoxide_head STREQUAL ZOXIDE_GIT_TAG)
+        message(WARNING
+            "zoxide checkout ${_zoxide_head} differs from the pinned ZOXIDE_GIT_TAG "
+            "${ZOXIDE_GIT_TAG}; pass -DZOXIDE_GIT_TAG to update the pin")
+    endif()
+endif()
 
 # ══════════════════════════════════════════════════════════════════════════
 # zsh source (for building the zsh module — headers only)
@@ -202,6 +252,7 @@ file(GLOB_RECURSE ZOXIDE_UPSTREAM_SOURCES CONFIGURE_DEPENDS
 set(ZOXIDE_FFI_DEPENDS
     ${ZOXIDE_FFI_RUST_SOURCES}
     ${ZOXIDE_UPSTREAM_SOURCES}
+    "${RUST_SRC_DIR}/build.rs"
     "${RUST_SRC_DIR}/Cargo.toml"
     "${RUST_SRC_DIR}/Cargo.lock"
     "${ZOXIDE_SRC_DIR}/Cargo.toml"
@@ -223,7 +274,12 @@ endif()
 
 add_custom_command(
     OUTPUT "${FFI_SHARED}"
-    COMMAND ${CMAKE_COMMAND} -E env "CARGO_HOME=${CARGO_HOME_DIR}"
+    # build.rs embeds ZOXIDE_VERSION (and ZOXIDE_COMMIT) in the library, so the
+    # reported version follows the zoxide checkout we build against.
+    COMMAND ${CMAKE_COMMAND} -E env
+        "CARGO_HOME=${CARGO_HOME_DIR}"
+        "ZOXIDE_VERSION=${ZOXIDE_VERSION}"
+        "ZOXIDE_COMMIT=${ZOXIDE_GIT_TAG}"
         ${CARGO} build ${CARGO_RELEASE_FLAG}
     ${ZOXIDE_FFI_FIX}
     WORKING_DIRECTORY "${RUST_SRC_DIR}"
@@ -374,9 +430,13 @@ if(BUILD_TESTS)
 
     enable_testing()
     add_test(NAME ffi_smoke COMMAND ffi_smoke "${FFI_SHARED}")
+    set_tests_properties(ffi_smoke PROPERTIES
+        ENVIRONMENT "ZOXIDE_VERSION=${ZOXIDE_VERSION}")
 
     add_custom_target(test-rust
-        COMMAND ${CMAKE_COMMAND} -E env "CARGO_HOME=${CARGO_HOME_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E env
+            "CARGO_HOME=${CARGO_HOME_DIR}"
+            "ZOXIDE_VERSION=${ZOXIDE_VERSION}"
             ${CARGO} test ${CARGO_RELEASE_FLAG}
         WORKING_DIRECTORY "${RUST_SRC_DIR}"
         USES_TERMINAL
@@ -398,6 +458,7 @@ if(BUILD_TESTS)
         add_custom_target(test-zsh
             COMMAND ${CMAKE_COMMAND} -E env
                 "MODULE_DIR=${ZSH_MODULE_TEST_DIR}"
+                "EXPECTED_ZOXIDE_VERSION=${ZOXIDE_VERSION}"
                 zsh "${CMAKE_SOURCE_DIR}/tests/test_zoxide_zsh.sh"
             DEPENDS ${ZSH_MODULE_NAME}
             USES_TERMINAL
@@ -417,6 +478,7 @@ if(BUILD_TESTS)
                 "DLL_DIR=${PWSH_OUT_DIR}"
                 "DOTNET_CLI_HOME=${DOTNET_HOME_DIR}"
                 "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1"
+                "EXPECTED_ZOXIDE_VERSION=${ZOXIDE_VERSION}"
                 pwsh -NoProfile -File "${CMAKE_SOURCE_DIR}/tests/test_pwsh.ps1"
                     -DllDir "${PWSH_OUT_DIR}"
             DEPENDS zoxide_pwsh
@@ -436,6 +498,8 @@ message(STATUS "zoxide-native ${PROJECT_VERSION} — Build Configuration")
 message(STATUS "──────────────────────────────────────────────────")
 message(STATUS "Generator:         ${CMAKE_GENERATOR}")
 message(STATUS "zoxide source:     ${ZOXIDE_SRC_DIR}")
+message(STATUS "zoxide version:    ${ZOXIDE_VERSION}")
+message(STATUS "zoxide git pin:    ${ZOXIDE_GIT_TAG}")
 message(STATUS "zsh source:        ${ZSH_SRC_DIR}")
 message(STATUS "zsh module:        ${BUILD_ZSH_MODULE}")
 message(STATUS "PowerShell module: ${BUILD_PWSH_MODULE}")

@@ -4,7 +4,7 @@
 
 zoxide 的 shell 集成在每个热路径上都启动一个独立进程：
 
-1. **`zoxide add`**（chpwd / prompt hook）：每次目录变化 fork + exec，打开并反序列化 `db.zo`，写入后退出。
+1. **`zoxide add`**（chpwd / prompt hook）：每次目录变化 fork + exec，打开并反序列化 `db.txt`，写入后退出。
 2. **`zoxide query`**（`z` / `zi` / 补全）：同样 fork + exec，并再次打开同一个数据库。
 
 进程启动开销在小跳转上非常明显。
@@ -14,7 +14,7 @@ zoxide 的 shell 集成在每个热路径上都启动一个独立进程：
 把 zoxide 的 `add` / `query` / `remove` 编译为 C FFI 动态库，由 shell 直接加载：
 
 - **零进程创建**：zsh 通过内置命令、pwsh 通过 P/Invoke 调用进程内实现
-- **原版并发模型**：Session 不常驻 `Database`，每个命令都像 `zoxide` 二进制一样打开/保存/关闭 `db.zo`，避免旧内存覆盖其他 shell 的更新
+- **原版并发模型**：Session 不常驻 `Database`，每个命令都像 `zoxide` 二进制一样打开/保存/关闭 `db.txt`，避免旧内存覆盖其他 shell 的更新
 - **全局单 session**：FFI 每个进程只保持一个 session（`zo_init` / `zo_shutdown`），所有数据调用不带 handle；shell 宿主本身就是单实例，多 session 只会带来 handle 管线
 - **fork 安全设计**：zsh 插件直接调用零参数 builtin，结果通过 `ZOXIDE_RESULT` 参数传递；不在 `$()` 中运行 FFI 调用
 
@@ -94,7 +94,7 @@ zoxide = { path = "../zoxide", default-features = false, features = ["in-process
 `Session` 不持有 `Database`。`add` / `remove` 构造上游 `cmd::Add` /
 `cmd::Remove` 并执行 `Run`；`query` 构造 `cmd::Query` 并调用
 `run_with_writer(&mut Vec<u8>)` 捕获输出。每个命令打开、保存、关闭一次
-`db.zo`，因此另一个 shell 写库后，下一个命令一定看到最新数据，不会用常驻
+`db.txt`，因此另一个 shell 写库后，下一个命令一定看到最新数据，不会用常驻
 内存覆盖磁盘。
 
 `Session::query` 捕获上游 stdout 后统一去掉尾随 `\n` / `\r`，模拟
@@ -136,20 +136,20 @@ char *zo_query(const zo_query_options_t *options, char **out);
 
 // 元数据 / 统计
 char       *zo_stats(zo_stats_t *out);
-const char *zo_version(void);                      // 静态字符串，不可释放
+const char *zo_version(void);                      // 上游 zoxide 版本，静态字符串
 void        zo_free(char *ptr);                    // 释放结果与错误消息
 ```
 
 内存约定：`zo_query` 成功时把结果写入 `*out`，失败时把 `*out` 置为 NULL
 （调用方不能复用上一次的 out 指针），两种情况都通过返回值报告是否出错。
-`zo_version` 返回静态字符串，不可释放。出错返回的消息同样由 Rust 分配，
-必须 `zo_free`；`zo_free` 不可能失败，因此返回 void。
+`zo_version` 返回嵌入的上游 zoxide 版本（静态字符串，不可释放）。出错返回的
+消息同样由 Rust 分配，必须 `zo_free`；`zo_free` 不可能失败，因此返回 void。
 未调用 `zo_init` 就执行数据操作时，返回
 `"<op>: session is not initialized"`。
 
 `zo_shutdown` 之后可以再次 `zo_init`：zoxide 的 `src/` 没有可变全局/static
 状态（只有 `const` 字符串、`'static` 生命周期和测试锁），数据库状态完全在
-`db.zo` 里，所以重建的 session 是一份干净的新状态，同时仍能读写之前落盘的
+`db.txt` 里，所以重建的 session 是一份干净的新状态，同时仍能读写之前落盘的
 数据。`zo_init` 对已存在的 session 是幂等 no-op，不会意外清零计数器；
 需要重置计数器时显式调用 `zo_shutdown` 再 `zo_init`。
 
@@ -245,6 +245,7 @@ panic）。
 shell-integrated-zoxide/
 ├── rust_src/                    # FFI crate (cdylib)
 │   ├── Cargo.toml
+│   ├── build.rs                 # 从 zoxide checkout 注入 ZOXIDE_VERSION
 │   └── src/lib.rs, ffi.rs
 ├── zoxide/                      # 符号链接 → zoxide in-process fork
 │   └── src/session.rs           # Session / QueryOptions / SessionStats
@@ -275,7 +276,8 @@ shell-integrated-zoxide/
 CMake 负责：
 
 1. 解析/创建 `zoxide` 与 `zsh-5.9.2` 符号链接；只读 zoxide checkout 自动复制到构建目录
-2. 用真实 OUTPUT 规则构建 Rust cdylib（Ninja 可以正确增量判断）
-3. 编译 zsh 模块并设置 RPATH（Linux `$ORIGIN` / macOS `@loader_path`）
-4. 构建 .NET 8 二进制模块（`zoxide-native.psd1` + `zoxide-native.psm1`）并把原生库复制到输出目录
-5. 注册 CTest 与 `test-rust` / `test-upstream` / `test-zsh` / `test-pwsh` 自定义目标
+2. 从选定的 zoxide checkout 派生 `ZOXIDE_VERSION`（空则读 `Cargo.toml`），并钉住 `ZOXIDE_SOURCE=AUTO` 拉取的 commit（`ZOXIDE_GIT_TAG`）；通过 `ZOXIDE_VERSION` / `ZOXIDE_COMMIT` 环境变量传给 cargo `build.rs`
+3. 用真实 OUTPUT 规则构建 Rust cdylib（Ninja 可以正确增量判断）
+4. 编译 zsh 模块并设置 RPATH（Linux `$ORIGIN` / macOS `@loader_path`）
+5. 构建 .NET 8 二进制模块（`zoxide-native.psd1` + `zoxide-native.psm1`）并把原生库复制到输出目录
+6. 注册 CTest 与 `test-rust` / `test-upstream` / `test-zsh` / `test-pwsh` 自定义目标

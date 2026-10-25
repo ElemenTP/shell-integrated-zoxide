@@ -52,8 +52,23 @@ zmodload zoxide_native || {
 print "PASS: module loaded from $MODULE_FILE"
 
 # ---- Builtin smoke tests ----------------------------------------------------
+# CMake passes the upstream zoxide version derived from the checkout. Keep a
+# copy because zoxide_version overwrites ZOXIDE_VERSION with the actual value.
+typeset -g EXPECTED_ZOXIDE_VERSION="${EXPECTED_ZOXIDE_VERSION:-}"
+unset ZOXIDE_VERSION
 zoxide_version
-[[ "${ZOXIDE_VERSION}" == "0.1.0" ]] && print "PASS: zoxide version ($ZOXIDE_VERSION)"
+if [[ -n "$EXPECTED_ZOXIDE_VERSION" ]]; then
+  [[ "${ZOXIDE_VERSION-}" == "$EXPECTED_ZOXIDE_VERSION" ]] || {
+    print -u2 "FAIL: zoxide version ${ZOXIDE_VERSION-} != expected $EXPECTED_ZOXIDE_VERSION"
+    exit 1
+  }
+else
+  [[ "${ZOXIDE_VERSION-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || {
+    print -u2 "FAIL: zoxide version is not a semver: ${ZOXIDE_VERSION-}"
+    exit 1
+  }
+fi
+print "PASS: zoxide version ($ZOXIDE_VERSION)"
 
 zoxide_stats
 [[ "${ZOXIDE_STATS_ENTRIES}" == "0" ]] && print "PASS: initial stats"
@@ -170,7 +185,7 @@ zoxide_stats
 }
 
 # A separate zsh process writes the database while this session stays loaded.
-# The next command in this session must reopen db.zo and see that update
+# The next command in this session must reopen db.txt and see that update
 # instead of overwriting it with stale in-memory state.
 if ! MODULE_DIR="$MODULE_DIR" _ZO_DATA_DIR="$DATA_DIR" CROSS_DIR="$CROSS_DIR" zsh -f -c '
   module_path=("$MODULE_DIR" $module_path)

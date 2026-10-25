@@ -99,7 +99,7 @@ function Remove-ZoxideEnv {
 function Get-ZoxideNativeVersion {
     <#
     .SYNOPSIS
-        Returns the version of the embedded zoxide-ffi native library.
+        Returns the upstream zoxide version embedded by the native library.
     #>
     return [ZoxideNative.Session]::Version()
 }
