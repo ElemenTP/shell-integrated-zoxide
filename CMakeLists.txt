@@ -23,10 +23,16 @@ endif()
 set(ZOXIDE_SOURCE "AUTO" CACHE STRING
     "zoxide source: 'AUTO' to use the zoxide symlink (or clone the in-process fork), or a local path")
 # The in-process feature is developed on a branch, so pin the commit (not the
-# moving branch) to keep AUTO builds reproducible. Bump this after rebasing the
-# branch; a local ZOXIDE_SOURCE checkout that differs only gets a warning.
-set(ZOXIDE_GIT_TAG "0ce4b891f624b8f400fd27bc44f7c63305ddcfa6" CACHE STRING
-    "zoxide commit/tag to fetch when ZOXIDE_SOURCE=AUTO")
+# moving branch) to keep AUTO builds reproducible. This is a normal variable
+# (not a cache entry) so bumping it here also takes effect in an existing build
+# directory; use -DZOXIDE_GIT_TAG_OVERRIDE for a one-off pin. A local
+# ZOXIDE_SOURCE checkout that differs only gets a warning.
+set(ZOXIDE_GIT_TAG "0ce4b891f624b8f400fd27bc44f7c63305ddcfa6")
+set(ZOXIDE_GIT_TAG_OVERRIDE "" CACHE STRING
+    "Override ZOXIDE_GIT_TAG (Zoxide commit/tag fetched when ZOXIDE_SOURCE=AUTO)")
+if(ZOXIDE_GIT_TAG_OVERRIDE)
+    set(ZOXIDE_GIT_TAG "${ZOXIDE_GIT_TAG_OVERRIDE}")
+endif()
 # The upstream zoxide version the FFI reports. Empty = derive it from the
 # selected checkout.
 set(ZOXIDE_VERSION "" CACHE STRING
@@ -159,7 +165,7 @@ if(EXISTS "${ZOXIDE_SRC_DIR}/.git")
     if(_zoxide_git_rc EQUAL 0 AND NOT _zoxide_head STREQUAL ZOXIDE_GIT_TAG)
         message(WARNING
             "zoxide checkout ${_zoxide_head} differs from the pinned ZOXIDE_GIT_TAG "
-            "${ZOXIDE_GIT_TAG}; pass -DZOXIDE_GIT_TAG to update the pin")
+            "${ZOXIDE_GIT_TAG}; use -DZOXIDE_GIT_TAG_OVERRIDE=<commit> for a one-off pin")
     endif()
 endif()
 

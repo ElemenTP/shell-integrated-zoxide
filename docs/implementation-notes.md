@@ -313,10 +313,11 @@ libc `setenv` / `unsetenv`。`_ZO_DATA_DIR` 在 `Initialize()` 之前同步到
 
 三者关系：
 
-- **`ZOXIDE_GIT_TAG`**（CMake cache）：`ZOXIDE_SOURCE=AUTO` 且本地没有
-  `zoxide/` checkout 时拉取的 zoxide commit（也可以是 branch/tag）。它钉住的
-  是上游源码，rebase `in-process` 之后要手动 bump；本地 checkout 的 HEAD 与
-  它不一致时 CMake 只 warning，方便 in-tree 开发。
+- **`ZOXIDE_GIT_TAG`**（CMakeLists 里的普通变量）：`ZOXIDE_SOURCE=AUTO` 时拉取的
+  Zoxide commit（也可以是 branch/tag）。它钉住的是**上游源码**，rebase
+  `in-process` 之后要手动 bump；用普通变量而不是 cache，是为了让改文件里的 pin
+  在已有 build 目录里也生效（一次性覆盖用 `-DZOXIDE_GIT_TAG_OVERRIDE=<commit>`）。
+  本地 `ZOXIDE_SOURCE=…` 的 HEAD 与它不一致时只 warning。
 - **`ZOXIDE_VERSION`**（CMake cache，空则自动）：从
   `${ZOXIDE_SRC_DIR}/Cargo.toml` 的 `version = "x.y.z"` 解析。
   `rust_src/build.rs` 通过环境变量拿到它（直接 `cargo build` 时则自己读

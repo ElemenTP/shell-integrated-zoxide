@@ -20,9 +20,9 @@ FFI 不再持有常驻 `Database`，而是直接构造上游 `cmd::Add` / `cmd::
 
 ## 支持平台
 
-| Shell                | 平台                  | 加载方式                     |
-| -------------------- | --------------------- | ---------------------------- |
-| zsh                  | Linux, macOS          | `zmodload zoxide_native`     |
+| Shell                | 平台                  | 加载方式                        |
+| -------------------- | --------------------- | ------------------------------- |
+| zsh                  | Linux, macOS          | `zmodload zoxide_native`      |
 | pwsh (PowerShell 7+) | Windows, Linux, macOS | `Import-Module zoxide-native` |
 
 ## 编译
@@ -45,7 +45,7 @@ cmake --build build --config Release
 
 如果本地没有这两个 checkout，CMake 会从 GitHub 拉取固定 commit 的 zoxide、从 SourceForge 下载并配置 zsh 5.9.2。若本地 zoxide checkout 只读，CMake 会自动复制到构建目录中供 cargo 使用。
 
-`AUTO` 拉取的 zoxide commit 由 `ZOXIDE_GIT_TAG` 钉住（默认是当前 `in-process` tip），不是移动中的 `in-process` 分支，因此构建可复现；rebase 分支后需要把 pin 更新到新的 tip（本地 checkout 与 pin 不一致时 CMake 只给出 warning，方便开发）。FFI 的 `zo_version` / `zoxide_version` / `Get-ZoxideNativeVersion` 返回的是**上游 zoxide 版本**，由 `rust_src/build.rs` 从 zoxide 源码树的 `Cargo.toml` 读取（CMake 也会以 `ZOXIDE_VERSION` 传入，可用 `-DZOXIDE_VERSION=` 覆盖），不是 wrapper 自己的 0.1.0。更新 pin 或上游版本后需要重新运行 `cmake -B build -S .`。
+`AUTO` 拉取的 zoxide commit 由 `ZOXIDE_GIT_TAG` 钉住（默认是当前 `in-process` tip），不是移动中的 `in-process` 分支，因此构建可复现；rebase 分支后需要把 pin 更新到新的 tip（本地 checkout 与 pin 不一致时 CMake 只给出 warning，方便开发）。可以用`ZOXIDE_GIT_TAG_OVERRIDE`临时覆盖拉取得zoxide commit。FFI 的 `zo_version` / `zoxide_version` / `Get-ZoxideNativeVersion` 返回的是**上游 zoxide 版本**，由 `rust_src/build.rs` 从 zoxide 源码树的 `Cargo.toml` 读取（CMake 也会以 `ZOXIDE_VERSION` 传入，可用 `-DZOXIDE_VERSION=` 覆盖），不是 wrapper 自己的 0.1.0。更新 pin 或上游版本后需要重新运行 `cmake -B build -S .`。
 
 ### 使用本地源码
 
@@ -75,16 +75,16 @@ cmake --install build --config Release --prefix ~/.local
 
 ### CMake 选项
 
-| 选项                 | 默认值    | 说明                                                    |
-| -------------------- | --------- | ------------------------------------------------------- |
-| `ZOXIDE_SOURCE`      | `AUTO`    | zoxide 源码：`AUTO` 使用符号链接/GitHub，或本地路径      |
-| `ZOXIDE_GIT_TAG`     | `0ce4b89…`（当前 in-process tip） | `ZOXIDE_SOURCE=AUTO` 且本地无 checkout 时钉住的 zoxide commit；也可写 branch/tag |
-| `ZOXIDE_VERSION`     | 空（自动） | FFI 上报的上游 zoxide 版本；空则从源码树的 `Cargo.toml` 派生 |
-| `ZSH_SOURCE`         | `AUTO`    | zsh 源码：`AUTO` 使用符号链接/下载 zsh 5.9.2，或本地路径 |
-| `ZSH_VERSION`        | `5.9.2`   | 下载 zsh 的版本（ZSH_SOURCE=AUTO 时）                   |
-| `BUILD_ZSH_MODULE`   | `ON`      | 构建 zsh 可加载模块                                     |
-| `BUILD_PWSH_MODULE`  | `ON`      | 构建 PowerShell 二进制模块                              |
-| `BUILD_TESTS`        | `ON`      | 构建测试目标                                            |
+| 选项                        | 默认值     | 说明                                                                                                                     |
+| --------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `ZOXIDE_SOURCE`           | `AUTO`   | zoxide 源码：`AUTO` 使用符号链接/GitHub，或本地路径                                                                    |
+| `ZOXIDE_GIT_TAG_OVERRIDE` | 空         | 覆盖 `CMakeLists.txt` 里钉住的 Zoxide commit（`ZOXIDE_SOURCE=AUTO` 时；也可以写 branch/tag）；不设置就用文件里的 pin |
+| `ZOXIDE_VERSION`          | 空（自动） | FFI 上报的上游 zoxide 版本；空则从源码树的 `Cargo.toml` 派生                                                           |
+| `ZSH_SOURCE`              | `AUTO`   | zsh 源码：`AUTO` 使用符号链接/下载 zsh 5.9.2，或本地路径                                                               |
+| `ZSH_VERSION`             | `5.9.2`  | 下载 zsh 的版本（ZSH_SOURCE=AUTO 时）                                                                                    |
+| `BUILD_ZSH_MODULE`        | `ON`     | 构建 zsh 可加载模块                                                                                                      |
+| `BUILD_PWSH_MODULE`       | `ON`     | 构建 PowerShell 二进制模块                                                                                               |
+| `BUILD_TESTS`             | `ON`     | 构建测试目标                                                                                                             |
 
 生成器选择：
 
@@ -115,9 +115,9 @@ cmake --install build --config Release --prefix ~/.local
 | 管理器    | 配置示例                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------- |
 | oh-my-zsh | `git clone <repo> ~/.oh-my-zsh/custom/plugins/zoxide-native`，然后 `plugins=(... zoxide-native)` |
-| zinit     | `zinit light <user>/shell-integrated-zoxide`                                                         |
-| antigen   | `antigen bundle <user>/shell-integrated-zoxide`                                                      |
-| zplug     | `zplug "<user>/shell-integrated-zoxide", use:"zoxide-native.plugin.zsh"`                            |
+| zinit     | `zinit light <user>/shell-integrated-zoxide`                                                       |
+| antigen   | `antigen bundle <user>/shell-integrated-zoxide`                                                    |
+| zplug     | `zplug "<user>/shell-integrated-zoxide", use:"zoxide-native.plugin.zsh"`                           |
 
 #### 方式二：手动加载
 
@@ -139,13 +139,13 @@ source /path/to/shell-integrated-zoxide/zsh_src/zoxide-native.plugin.zsh
 
 可用内置命令都是零参数 builtin，输入/输出通过 zsh 变量传递：
 
-| Builtin          | 读取变量                                            | 写入变量          |
-| ---------------- | --------------------------------------------------- | ----------------- |
-| `zoxide_add`     | `ZOXIDE_ADD_PATH`（标量或数组）、`ZOXIDE_ADD_SCORE`（可选） | —                 |
-| `zoxide_query`   | `ZOXIDE_QUERY_KEYWORDS`（数组）、`ZOXIDE_QUERY_EXCLUDE`、`ZOXIDE_QUERY_BASE_DIR`、`ZOXIDE_QUERY_ALL`、`ZOXIDE_QUERY_INTERACTIVE`、`ZOXIDE_QUERY_LIST`、`ZOXIDE_QUERY_SCORE` | `ZOXIDE_RESULT` |
-| `zoxide_remove`  | `ZOXIDE_REMOVE_PATHS`（标量或数组）                 | —                 |
-| `zoxide_version` | —                                                   | `ZOXIDE_VERSION`  |
-| `zoxide_stats`   | —                                                   | `ZOXIDE_STATS_*`  |
+| Builtin            | 读取变量                                                                                                                                                                                  | 写入变量           |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `zoxide_add`     | `ZOXIDE_ADD_PATH`（标量或数组）、`ZOXIDE_ADD_SCORE`（可选）                                                                                                                           | —                 |
+| `zoxide_query`   | `ZOXIDE_QUERY_KEYWORDS`（数组）、`ZOXIDE_QUERY_EXCLUDE`、`ZOXIDE_QUERY_BASE_DIR`、`ZOXIDE_QUERY_ALL`、`ZOXIDE_QUERY_INTERACTIVE`、`ZOXIDE_QUERY_LIST`、`ZOXIDE_QUERY_SCORE` | `ZOXIDE_RESULT`  |
+| `zoxide_remove`  | `ZOXIDE_REMOVE_PATHS`（标量或数组）                                                                                                                                                     | —                 |
+| `zoxide_version` | —                                                                                                                                                                                        | `ZOXIDE_VERSION` |
+| `zoxide_stats`   | —                                                                                                                                                                                        | `ZOXIDE_STATS_*` |
 
 `zoxide_version` 打印并写入嵌入的**上游 zoxide 版本**（不是 wrapper 的
 0.1.0）；`-q` 只写变量不打印。
@@ -205,12 +205,12 @@ cmake --build build --config Release --target check            # CTest（FFI 系
 
 `tests/` 中的测试分层（安装了 fzf 时，zsh/pwsh 集成测试会额外覆盖 `--interactive` 查询）：
 
-| 测试                        | 类型       | 说明                                        |
-| --------------------------- | ---------- | ------------------------------------------- |
-| `test-rust` / `test-upstream` | 单元测试 | `rust_src` 全局 session/FFI 测试 + 上游 zoxide session/db/权限测试 |
-| `ffi_smoke.c`               | 系统测试   | `dlopen` 真实 `libzoxide_ffi`，验证 ABI 与全局 session 生命周期 |
-| `test_zoxide_zsh.sh`        | 集成测试   | zmodload、变量协议、跨进程可见性、非 ASCII EXCLUDE/BASE_DIR、插件函数 |
-| `test_unload_zoxide_zsh.sh` | 集成测试   | 失败加载可重试 + 反复 `zmodload -u` / `zmodload` 并校验计数器归零 |
-| `test_pwsh.ps1`             | 集成测试   | 模块导入/移除重载、hook、z/zi、fzf、失败查询不抛异常 |
+| 测试                              | 类型     | 说明                                                                  |
+| --------------------------------- | -------- | --------------------------------------------------------------------- |
+| `test-rust` / `test-upstream` | 单元测试 | `rust_src` 全局 session/FFI 测试 + 上游 zoxide session/db/权限测试  |
+| `ffi_smoke.c`                   | 系统测试 | `dlopen` 真实 `libzoxide_ffi`，验证 ABI 与全局 session 生命周期   |
+| `test_zoxide_zsh.sh`            | 集成测试 | zmodload、变量协议、跨进程可见性、非 ASCII EXCLUDE/BASE_DIR、插件函数 |
+| `test_unload_zoxide_zsh.sh`     | 集成测试 | 失败加载可重试 + 反复 `zmodload -u` / `zmodload` 并校验计数器归零 |
+| `test_pwsh.ps1`                 | 集成测试 | 模块导入/移除重载、hook、z/zi、fzf、失败查询不抛异常                  |
 
 zoxide 上游的 `session.rs` 测试由 `test-upstream` 目标执行。
