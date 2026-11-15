@@ -27,7 +27,7 @@ set(ZOXIDE_SOURCE "AUTO" CACHE STRING
 # (not a cache entry) so bumping it here also takes effect in an existing build
 # directory; use -DZOXIDE_GIT_TAG_OVERRIDE for a one-off pin. A local
 # ZOXIDE_SOURCE checkout that differs only gets a warning.
-set(ZOXIDE_GIT_TAG "0ce4b891f624b8f400fd27bc44f7c63305ddcfa6")
+set(ZOXIDE_GIT_TAG "2fda13603966464fae6c71af8af87b836c8c879c")
 set(ZOXIDE_GIT_TAG_OVERRIDE "" CACHE STRING
     "Override ZOXIDE_GIT_TAG (Zoxide commit/tag fetched when ZOXIDE_SOURCE=AUTO)")
 if(ZOXIDE_GIT_TAG_OVERRIDE)
@@ -240,8 +240,6 @@ endif()
 set(RUST_SRC_DIR "${CMAKE_SOURCE_DIR}/rust_src")
 set(CARGO_RELEASE_FLAG "$<IF:$<CONFIG:Release>,--release,>")
 set(CARGO_PROFILE_DIR "$<IF:$<CONFIG:Release>,release,debug>")
-set(CARGO_HOME_DIR "${CMAKE_BINARY_DIR}/cargo-home")
-file(MAKE_DIRECTORY "${CARGO_HOME_DIR}")
 
 set(FFI_NAME "${CMAKE_SHARED_LIBRARY_PREFIX}zoxide_ffi${CMAKE_SHARED_LIBRARY_SUFFIX}")
 set(FFI_SHARED "${RUST_SRC_DIR}/target/${CARGO_PROFILE_DIR}/${FFI_NAME}")
@@ -283,7 +281,6 @@ add_custom_command(
     # build.rs embeds ZOXIDE_VERSION (and ZOXIDE_COMMIT) in the library, so the
     # reported version follows the zoxide checkout we build against.
     COMMAND ${CMAKE_COMMAND} -E env
-        "CARGO_HOME=${CARGO_HOME_DIR}"
         "ZOXIDE_VERSION=${ZOXIDE_VERSION}"
         "ZOXIDE_COMMIT=${ZOXIDE_GIT_TAG}"
         ${CARGO} build ${CARGO_RELEASE_FLAG}
@@ -331,11 +328,11 @@ if(BUILD_ZSH_MODULE)
 
     if(APPLE)
         target_link_options(${ZSH_MODULE_NAME} PRIVATE
-            -Wl,-undefined,dynamic_lookup
+            -Wl,-undefined,dynamic_lookup -fPIC -O3 -flto -Wall -Wextra
         )
     else()
         target_link_options(${ZSH_MODULE_NAME} PRIVATE
-            -Wl,--allow-shlib-undefined -Wl,-z,lazy
+            -Wl,--allow-shlib-undefined -Wl,-z,lazy -fPIC -O3 -flto -Wall -Wextra
         )
     endif()
 
@@ -441,7 +438,6 @@ if(BUILD_TESTS)
 
     add_custom_target(test-rust
         COMMAND ${CMAKE_COMMAND} -E env
-            "CARGO_HOME=${CARGO_HOME_DIR}"
             "ZOXIDE_VERSION=${ZOXIDE_VERSION}"
             ${CARGO} test ${CARGO_RELEASE_FLAG}
         WORKING_DIRECTORY "${RUST_SRC_DIR}"
@@ -449,7 +445,7 @@ if(BUILD_TESTS)
     )
 
     add_custom_target(test-upstream
-        COMMAND ${CMAKE_COMMAND} -E env "CARGO_HOME=${CARGO_HOME_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E env
             ${CARGO} test --features in-process
         WORKING_DIRECTORY "${ZOXIDE_SRC_DIR}"
         USES_TERMINAL
